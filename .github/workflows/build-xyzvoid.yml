@@ -72,7 +72,7 @@ jobs:
 
     - name: Install LLVM/Clang 20 (Latest Stable)
       run: |
-        # Add LLVM 19 repository (latest stable as of June 2025)
+        # Add LLVM 20 repository (latest stable as of June 2025)
         wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
         echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{ env.LLVM_VERSION }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
         
@@ -143,16 +143,6 @@ jobs:
         scripts/config --enable CONFIG_FORTIFY_SOURCE
         scripts/config --enable CONFIG_STACKPROTECTOR_STRONG
         
-        # Disable problematic CPU feature detection that causes warnings
-        scripts/config --disable CONFIG_CPU_SUP_AMD_FAM10H
-        scripts/config --disable CONFIG_CPU_SUP_AMD_FAM15H
-        scripts/config --disable CONFIG_CPU_SUP_AMD_FAM16H
-        scripts/config --disable CONFIG_CPU_SUP_AMD_FAM17H_19H
-        scripts/config --disable CONFIG_CPU_SUP_HYGON_FAM18H
-        
-        # Disable AVX-512 specific features that cause warnings
-        scripts/config --disable CONFIG_AS_AVX512
-        
         # Memory management optimizations
         scripts/config --enable CONFIG_SLAB_FREELIST_RANDOM
         scripts/config --enable CONFIG_SHUFFLE_PAGE_ALLOCATOR
@@ -173,7 +163,7 @@ jobs:
         scripts/config --set-str CONFIG_ZSWAP_COMPRESSOR_DEFAULT "lz4"
         scripts/config --set-str CONFIG_ZSWAP_ZPOOL_DEFAULT "zsmalloc"
         
-        # Modern CPU features for x86_64-v3
+        # Modern CPU features for x86_64
         scripts/config --enable CONFIG_X86_64
         scripts/config --enable CONFIG_64BIT
         scripts/config --enable CONFIG_X86_TSC
@@ -218,9 +208,9 @@ jobs:
         export LLVM=1
         export LLVM_IAS=1
         
-        # Optimized build flags for x86_64-v3 (more conservative to avoid warnings)
-        export KCFLAGS="-O3 -march=x86-64-v2 -mtune=generic -fno-semantic-interposition"
-        export KCPPFLAGS="-O3 -march=x86-64-v2"
+        # Optimized build flags for x86_64 (default, no v3 specific flags)
+        export KCFLAGS="-O3 -march=x86-64 -mtune=generic -fno-semantic-interposition"
+        export KCPPFLAGS="-O3 -march=x86-64"
         
         # Build kernel and modules
         make ARCH=x86_64 -j$(nproc) bzImage modules
@@ -247,40 +237,17 @@ jobs:
         make ARCH=x86_64 INSTALL_HDR_PATH=kernel-build/x86_64/usr headers_install
         
         # Get the actual kernel version directory name
-        KERNEL_VERSION_FULL=$(ls kernel-build/x86_64/lib/modules/)
-        echo "Found kernel version directory: $KERNEL_VERSION_FULL"
+        KERNEL_VERSION_FULL=$(ls kernel-build/x86_64/lib/modules/ | head -n1)
         
-        # Create proper symlinks (not directories) for build and source
-        # These should point to the kernel source tree location
-        KERNEL_SRC_PATH="/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}"
+        # Create proper symlinks for module build directory
+        # Remove any existing build/source entries first
+        rm -rf kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/build
+        rm -rf kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/source
         
-        # Remove any existing build/source files and create proper symlinks
-        rm -f kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/build
-        rm -f kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/source
-        
-        # Create relative symlinks that will work when installed
-        ln -sf "$KERNEL_SRC_PATH" kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/build
-        ln -sf "$KERNEL_SRC_PATH" kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/source
-        
-        # Verify symlinks were created correctly
-        echo "=== Module Directory Structure ==="
-        ls -la kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/
-        
-        # Create kernel source directory structure for DKMS
-        mkdir -p kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
-        
-        # Copy essential files for DKMS module building
-        cp .config kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/
-        cp System.map kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/
-        cp Module.symvers kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/ 2>/dev/null || true
-        
-        # Copy Makefile and scripts needed for module building
-        cp Makefile kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/
-        cp -r scripts kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/ 2>/dev/null || true
-        cp -r include kernel-build/x86_64/usr/src/linux-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}/ 2>/dev/null || true
-        
-        echo "=== Package Structure ==="
-        find kernel-build/x86_64 -type l -ls
+        # Create symlinks pointing to the kernel source (which won't exist on target system)
+        # This is mainly for DKMS modules that need to know where to find kernel headers
+        ln -sf /usr/src/linux-headers-$KERNEL_VERSION_FULL kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/build
+        ln -sf /usr/src/linux-headers-$KERNEL_VERSION_FULL kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/source
 
     - name: Generate package metadata and installation script
       run: |
@@ -301,8 +268,8 @@ jobs:
         - Compiler: Clang/LLVM ${{ env.LLVM_VERSION }}
         - Build Date: ${{ env.BUILD_TIMESTAMP }}
         - Git Commit: ${{ env.KERNEL_FULL_COMMIT }}
-        - Target: x86_64-v2 (SSE4.2, POPCNT, CRC32)
-        - Optimizations: -O3 -march=x86-64-v2 -mtune=generic
+        - Target: x86_64 (generic 64-bit)
+        - Optimizations: -O3 -march=x86-64 -mtune=generic
         - LTO: Thin LTO enabled
         - CFI: Control Flow Integrity enabled
         - Security: FORTIFY_SOURCE, Stack protection, Hardened usercopy
@@ -314,13 +281,12 @@ jobs:
         - High-resolution timers
         - Preemptive voluntary scheduling
         - Enhanced security and memory protection
-        - Modern x86_64 CPU optimizations
+        - Standard x86_64 CPU optimizations
         
         Package Contents:
         - boot/: Kernel image, config, System.map
         - lib/modules/: Kernel modules
         - usr/include/: Kernel headers for DKMS
-        - usr/src/: Kernel source tree for module building
         EOF
         
         # Create smart installation script
@@ -350,17 +316,6 @@ jobs:
             exit 1
         fi
         
-        # Check for x86_64-v2 support (more conservative)
-        if ! grep -q "sse4_2\|popcnt" /proc/cpuinfo; then
-            echo "⚠️  Warning: Your CPU may not support x86_64-v2 features"
-            echo "    This kernel is optimized for modern CPUs (2009+)"
-            read -p "Continue anyway? [y/N]: " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-        fi
-        
         # Backup current kernel
         echo "🔄 Creating backup of current kernel..."
         BACKUP_DIR="/boot/backup-$(date +%Y%m%d-%H%M%S)"
@@ -374,16 +329,14 @@ jobs:
         echo "📦 Installing kernel files..."
         cp -v boot/* /boot/
         cp -r lib/modules/* /lib/modules/
+        [ -d usr/include ] && cp -r usr/include/* /usr/include/ 2>/dev/null || true
         
-        # Install kernel source and headers for DKMS
-        if [ -d usr/src ]; then
-            echo "📦 Installing kernel source for DKMS..."
-            cp -r usr/src/* /usr/src/ 2>/dev/null || true
-        fi
-        
+        # Create kernel headers directory for DKMS
+        HEADERS_DIR="/usr/src/linux-headers-$KERNEL_VERSION"
         if [ -d usr/include ]; then
-            echo "📦 Installing kernel headers..."
-            cp -r usr/include/* /usr/include/ 2>/dev/null || true
+            echo "📋 Installing kernel headers for DKMS..."
+            mkdir -p "$HEADERS_DIR"
+            cp -r usr/include/* "$HEADERS_DIR/" 2>/dev/null || true
         fi
         
         # Update initramfs
@@ -457,7 +410,7 @@ jobs:
         echo "🗑️  Removing kernel files..."
         rm -f /boot/*xyzvoid-kernel* /boot/*$KERNEL_VERSION*
         rm -rf /lib/modules/$KERNEL_VERSION
-        rm -rf /usr/src/*xyzvoid-kernel* 2>/dev/null || true
+        rm -rf /usr/src/linux-headers-$KERNEL_VERSION
         
         echo "🔧 Updating bootloader..."
         if command -v update-grub >/dev/null 2>&1; then
@@ -548,8 +501,8 @@ jobs:
         | **Maintainer** | ${{ env.MAINTAINER }} |
         | **Build Date** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
         | **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |
-        | **Architecture** | x86_64 (x86_64-v2 optimized) |
-        | **Target CPUs** | Intel Nehalem+ (2009), AMD K10+ (2009) |
+        | **Architecture** | x86_64 (generic 64-bit) |
+        | **Target CPUs** | All x86_64 compatible processors |
         
         ## ✨ Key Features
         
@@ -562,7 +515,7 @@ jobs:
         - **SLAB Randomization** - Randomized kernel memory allocator
         
         ### ⚡ Performance Optimizations
-        - **x86_64-v2 Target** - SSE4.2, POPCNT, CRC32 optimizations for modern CPUs
+        - **x86_64 Generic** - Compatible with all 64-bit Intel/AMD processors
         - **Thin LTO** - Link-time optimization for better performance
         - **-O3 Compilation** - Maximum compiler optimization
         - **ZSWAP** - Compressed swap (LZ4, enabled by default)
@@ -573,7 +526,8 @@ jobs:
         - **Preemptive Voluntary** - Balanced responsiveness and throughput
         - **Tickless Operation** - Reduced power consumption and latency
         - **ZSTD/LZ4 Compression** - Fast compression throughout the kernel
-        - **DKMS Support** - Full kernel headers and source for third-party modules
+        - **Minimal Feature Set** - Audio, wireless, and non-essential drivers disabled
+        - **DKMS Support** - Kernel headers included for third-party modules
         
         ## 📦 Downloads
         
@@ -588,11 +542,10 @@ jobs:
         - **Architecture**: x86_64 (64-bit Intel/AMD)
         - **CPU**: Any x86_64 processor
         - **RAM**: 512MB minimum, 2GB+ recommended
-        - **Storage**: 200MB for kernel package
+        - **Storage**: 100MB for kernel package
         
         ### Optimal Performance
-        - **CPU**: Intel Nehalem (2009+) or AMD K10 (2009+)
-        - **Features**: SSE4.2, POPCNT, CRC32 support
+        - **CPU**: Any modern x86_64 processor
         - **RAM**: 4GB+ for best ZSWAP performance
         
         ## 🛠️ Quick Installation
@@ -625,7 +578,7 @@ jobs:
         ```
         
         ## 🎛️ Recommended Kernel Parameters
-
+        
         Add to your bootloader configuration:
         ```
         mitigations=auto transparent_hugepage=madvise zswap.enabled=1 zswap.compressor=lz4 quiet splash
@@ -644,7 +597,7 @@ jobs:
         
         ## ⚠️ Important Notes
         
-        - **CPU Compatibility**: Optimized for x86_64-v3 (2013+ Intel, 2015+ AMD)
+        - **CPU Compatibility**: Generic x86_64 build for maximum compatibility
         - **Backup**: Always keep your original kernel as backup
         - **Testing**: Test in virtual machine first if possible
         - **Production**: Consider carefully for production servers
@@ -678,7 +631,7 @@ jobs:
         echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
         echo "| **Release** | ${{ env.RELEASE_TAG }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Architecture** | x86_64 only |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Architecture** | x86_64 (generic) |" >> $GITHUB_STEP_SUMMARY
         echo "| **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Optimizations** | x86_64-v3, -O3, Thin LTO, CFI |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Optimizations** | x86_64 generic, -O3, Thin LTO, CFI |" >> $GITHUB_STEP_SUMMARY
         echo "| **Download** | [Release Page](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}) |" >> $GITHUB_STEP_SUMMARY
