@@ -22,7 +22,7 @@ env:
   KERNEL_NAME: xyzvoid-kernel
   MAINTAINER: vxyzview
   KERNEL_VERSION: 6.15.y
-  LLVM_VERSION: "latest-available"
+  LLVM_VERSION: "20"
   CACHE_VERSION: v3
 
 jobs:
@@ -85,18 +85,21 @@ jobs:
         
         sudo apt-get update
         
-        # Check available LLVM versions
+        # Check available LLVM versions dynamically
         echo "Available LLVM versions:"
-        apt-cache search --names-only '^clang-[0-20]+$' | head -10
+        apt-cache search --names-only '^clang-[0-9]+$' | sort -V
         
-        # Install latest available version (20 is likely the newest available)
-        AVAILABLE_VERSIONS=(20 19 18)
-        LLVM_VER="20"
+        # Get all available versions dynamically and sort them numerically (newest first)
+        AVAILABLE_VERSIONS=($(apt-cache search --names-only '^clang-[0-9]+$' | grep -oE '[0-9]+' | sort -nr | head -10))
+        LLVM_VER=""
+        
+        echo "Checking versions in order: ${AVAILABLE_VERSIONS[@]}"
         
         for ver in "${AVAILABLE_VERSIONS[@]}"; do
+          echo "Checking LLVM version $ver..."
           if apt-cache show clang-$ver >/dev/null 2>&1; then
             LLVM_VER=$ver
-            echo "Installing LLVM/Clang version $ver"
+            echo "Found and will install LLVM/Clang version $ver"
             break
           fi
         done
@@ -104,8 +107,9 @@ jobs:
         if [ -z "$LLVM_VER" ]; then
           echo "No suitable LLVM version found, using system default"
           sudo apt-get install -y clang lld llvm llvm-dev clang-tools
-          LLVM_VER=""
+          LLVM_VER="system-default"
         else
+          echo "Installing LLVM/Clang version $LLVM_VER..."
           sudo apt-get install -y \
             clang-$LLVM_VER \
             lld-$LLVM_VER \
@@ -113,17 +117,24 @@ jobs:
             llvm-$LLVM_VER-dev \
             clang-tools-$LLVM_VER \
             libc++1-$LLVM_VER \
-            libc++abi1-$LLVM_VER
+            libc++abi1-$LLVM_VER || {
+              echo "Failed to install some LLVM $LLVM_VER packages, trying core packages only..."
+              sudo apt-get install -y \
+                clang-$LLVM_VER \
+                lld-$LLVM_VER \
+                llvm-$LLVM_VER
+            }
           
-          # Set up alternatives
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-$LLVM_VER 100
-          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-$LLVM_VER 100
+          # Set up alternatives with higher priority for newer versions
+          PRIORITY=$((100 + LLVM_VER))
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-$LLVM_VER $PRIORITY
+          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-$LLVM_VER $PRIORITY
         fi
         
         # Verify installation
@@ -134,7 +145,11 @@ jobs:
         
         # Update environment variable with actual version
         ACTUAL_VER=$(clang --version | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+        if [ -z "$ACTUAL_VER" ]; then
+          ACTUAL_VER=$(clang --version | head -n1 | grep -oE 'version [0-9]+' | grep -oE '[0-9]+')
+        fi
         echo "ACTUAL_LLVM_VERSION=$ACTUAL_VER" >> $GITHUB_ENV
+        echo "LLVM_PACKAGE_VERSION=$LLVM_VER" >> $GITHUB_ENV
 
     - name: Setup enhanced ccache
       uses: hendrikmuhs/ccache-action@v1.2
