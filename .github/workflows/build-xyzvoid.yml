@@ -39,13 +39,7 @@ jobs:
             kernel_file: "arch/x86/boot/bzImage"
             kernel_name: "vmlinuz"
             optimizations: "-O3 -march=x86-64-v3 -mtune=generic"
-          - arch: arm64
-            cross_compile: "aarch64-linux-gnu-"
-            kernel_target: "Image"
-            kernel_file: "arch/arm64/boot/Image"
-            kernel_name: "Image"
-            optimizations: "-O3 -mcpu=generic"
-    
+
     steps:
     - name: Maximize build space
       uses: easimon/maximize-build-space@master
