@@ -22,7 +22,7 @@ env:
   KERNEL_NAME: xyzvoid-kernel
   MAINTAINER: vxyzview
   KERNEL_VERSION: 6.15.y
-  LLVM_VERSION: 20.1.6
+  LLVM_VERSION: 20
   CACHE_VERSION: v3
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64]
+        arch: [x86_64]
         include:
           - arch: x86_64
             cross_compile: ""
