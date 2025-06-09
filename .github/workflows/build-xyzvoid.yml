@@ -1,51 +1,64 @@
-name: Build XYZVoid Kernel Package
+name: Build XYZVoid Kernel
 
 on:
   push:
     branches: [ linux-6.15.y ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ linux-6.15.y ]
   workflow_dispatch:
     inputs:
-      kernel_config:
-        description: 'Kernel configuration (defconfig, allmodconfig, or custom)'
+      release_tag:
+        description: 'Release tag (e.g., v6.15.0-xyzvoid.1)'
         required: false
-        default: 'defconfig'
-        type: choice
-        options:
-          - defconfig
-          - allmodconfig
-          - custom
-      architecture:
-        description: 'Target architecture'
+        type: string
+      enable_debug:
+        description: 'Enable debug symbols'
         required: false
-        default: 'x86_64'
-        type: choice
-        options:
-          - x86_64
-          - arm64
-          - arm
-          - i386
+        type: boolean
+        default: false
 
 env:
-  KERNEL_VERSION: "6.15"
-  KERNEL_NAME: "xyzvoid-kernel"
-  MAINTAINER: "vxyzview"
-  MAINTAINER_EMAIL: "vxyzview@example.com"
-  JOBS: 4
+  KERNEL_NAME: xyzvoid-kernel
+  MAINTAINER: vxyzview
+  KERNEL_VERSION: 6.15.y
+  LLVM_VERSION: 20.1.6
+  CACHE_VERSION: v3
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+        include:
+          - arch: x86_64
+            cross_compile: ""
+            kernel_target: "bzImage"
+            kernel_file: "arch/x86/boot/bzImage"
+            kernel_name: "vmlinuz"
+            optimizations: "-O3 -march=x86-64-v3 -mtune=generic"
+          - arch: arm64
+            cross_compile: "aarch64-linux-gnu-"
+            kernel_target: "Image"
+            kernel_file: "arch/arm64/boot/Image"
+            kernel_name: "Image"
+            optimizations: "-O3 -mcpu=generic"
     
     steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
       with:
-        ref: linux-6.15.y
-        fetch-depth: 0
+        root-reserve-mb: 4096
+        swap-size-mb: 2048
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
 
-    - name: Set up build environment
+    - name: Install build dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -58,553 +71,585 @@ jobs:
           bc \
           kmod \
           cpio \
-          rsync \
-          debhelper \
-          kernel-package \
-          fakeroot \
+          initramfs-tools \
           wget \
           xz-utils \
-          dwarves \
-          rpm \
-          rpm-build \
-          rpmdevtools \
-          createrepo-c \
-          git
+          zstd \
+          ccache \
+          lld \
+          python3-pip \
+          rsync \
+          pahole \
+          gcc-aarch64-linux-gnu \
+          libc6-dev-arm64-cross
 
-    - name: Configure build variables
+    - name: Install LLVM/Clang ${{ env.LLVM_VERSION }}
       run: |
-        ARCH="${{ github.event.inputs.architecture || 'x86_64' }}"
-        CONFIG="${{ github.event.inputs.kernel_config || 'defconfig' }}"
-        BUILD_DATE=$(date +%Y%m%d)
+        # Download and install specific LLVM version
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
         
-        echo "TARGET_ARCH=$ARCH" >> $GITHUB_ENV
-        echo "KERNEL_CONFIG=$CONFIG" >> $GITHUB_ENV
-        echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
-        echo "KERNEL_RELEASE=$KERNEL_VERSION-xyzvoid" >> $GITHUB_ENV
+        # Install latest available version (closest to 20.1.6)
+        sudo apt-get update
+        sudo apt-get install -y \
+          clang-20 \
+          lld-20 \
+          llvm-20 \
+          llvm-20-dev \
+          clang-tools-20
         
-        # Set cross-compilation variables if needed
-        case $ARCH in
-          arm64)
-            echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-            echo "ARCH=arm64" >> $GITHUB_ENV
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-            ;;
-          arm)
-            echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_ENV
-            echo "ARCH=arm" >> $GITHUB_ENV
-            sudo apt-get install -y gcc-arm-linux-gnueabihf
-            ;;
-          i386)
-            echo "ARCH=i386" >> $GITHUB_ENV
-            ;;
-          *)
-            echo "ARCH=x86_64" >> $GITHUB_ENV
-            ;;
-        esac
+        # Set up alternatives
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 100
+        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-20 100
+        sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-20 100
+        sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-20 100
+        
+        clang --version
+        ld.lld --version
 
-    - name: Configure kernel
-      run: |
-        case $KERNEL_CONFIG in
-          defconfig)
-            make defconfig
-            ;;
-          allmodconfig)
-            make allmodconfig
-            ;;
-          custom)
-            # Use existing .config if present, otherwise defconfig
-            if [ ! -f .config ]; then
-              make defconfig
-            fi
-            ;;
-        esac
-        
-        # Set custom kernel name
-        sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-xyzvoid\"/" .config || echo 'CONFIG_LOCALVERSION="-xyzvoid"' >> .config
+    - name: Setup enhanced ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ env.CACHE_VERSION }}-${{ runner.os }}-${{ matrix.arch }}-kernel-${{ env.LLVM_VERSION }}
+        max-size: 4G
+        save: true
+        restore-keys: |
+          ${{ env.CACHE_VERSION }}-${{ runner.os }}-${{ matrix.arch }}-kernel-
 
-    - name: Build kernel
+    - name: Clone kernel source
       run: |
-        echo "Building XYZVoid kernel with $JOBS parallel jobs..."
-        make -j$JOBS LOCALVERSION=-xyzvoid
-        
-        # Build modules
-        make -j$JOBS modules
+        git clone --depth=50 --branch=linux-6.15.y https://github.com/${{ github.repository_owner }}/${{ env.KERNEL_NAME }}.git kernel-source
+        cd kernel-source
+        echo "KERNEL_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        echo "KERNEL_FULL_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        echo "KERNEL_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
+        echo "BUILD_TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_ENV
 
-    - name: Create base package structure
+    - name: Configure kernel for ${{ matrix.arch }}
       run: |
-        mkdir -p package-base/boot
-        mkdir -p package-base/lib/modules
-        mkdir -p package-base/usr/src
-        mkdir -p package-base/usr/include
+        cd kernel-source
+        export PATH="/usr/lib/ccache:$PATH"
+        export CC="ccache clang"
+        export CXX="ccache clang++"
+        export HOSTCC="clang"
+        export HOSTCXX="clang++"
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # Architecture-specific configuration
+        if [ "${{ matrix.arch }}" = "x86_64" ]; then
+          make ARCH=x86_64 defconfig
+          LOCALVERSION_SUFFIX="-${{ env.KERNEL_NAME }}"
+        elif [ "${{ matrix.arch }}" = "arm64" ]; then
+          make ARCH=arm64 CROSS_COMPILE=${{ matrix.cross_compile }} defconfig
+          LOCALVERSION_SUFFIX="-${{ env.KERNEL_NAME }}-arm64"
+        fi
+        
+        # Performance and security optimizations
+        scripts/config --set-str CONFIG_LOCALVERSION "$LOCALVERSION_SUFFIX"
+        scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+        scripts/config --enable CONFIG_LTO_CLANG_THIN
+        scripts/config --enable CONFIG_CFI_CLANG
+        scripts/config --enable CONFIG_SHADOW_CALL_STACK
+        scripts/config --enable CONFIG_FORTIFY_SOURCE
+        scripts/config --enable CONFIG_STACKPROTECTOR_STRONG
+        scripts/config --enable CONFIG_SLAB_FREELIST_RANDOM
+        scripts/config --enable CONFIG_SHUFFLE_PAGE_ALLOCATOR
+        
+        # Performance features
+        scripts/config --enable CONFIG_PREEMPT_VOLUNTARY
+        scripts/config --enable CONFIG_NO_HZ_IDLE
+        scripts/config --enable CONFIG_HIGH_RES_TIMERS
+        scripts/config --enable CONFIG_TRANSPARENT_HUGEPAGE
+        scripts/config --enable CONFIG_ZSTD_COMPRESS
+        scripts/config --enable CONFIG_LZ4_COMPRESS
+        scripts/config --enable CONFIG_ZRAM
+        scripts/config --enable CONFIG_ZSWAP
+        
+        # Debug configuration
+        if [ "${{ github.event.inputs.enable_debug }}" = "true" ]; then
+          scripts/config --enable CONFIG_DEBUG_INFO
+          scripts/config --enable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+        else
+          scripts/config --disable CONFIG_DEBUG_INFO
+          scripts/config --disable CONFIG_DEBUG_KERNEL
+        fi
+        
+        # Disable unnecessary features for size optimization
+        scripts/config --disable CONFIG_SOUND
+        scripts/config --disable CONFIG_SND
+        scripts/config --disable CONFIG_WIRELESS
+        scripts/config --disable CONFIG_WLAN
+        scripts/config --disable CONFIG_BLUETOOTH
+        scripts/config --module CONFIG_DRM
+        
+        make olddefconfig
+        
+        # Verify important configs
+        echo "=== Key Configuration Check ==="
+        grep -E "(CONFIG_LOCALVERSION|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG)" .config || true
+
+    - name: Build kernel ${{ matrix.arch }}
+      run: |
+        cd kernel-source
+        export PATH="/usr/lib/ccache:$PATH"
+        export CC="ccache clang"
+        export CXX="ccache clang++"
+        export HOSTCC="clang"
+        export HOSTCXX="clang++"
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # Build with optimizations
+        make ARCH=${{ matrix.arch }} \
+             CROSS_COMPILE=${{ matrix.cross_compile }} \
+             KCFLAGS="${{ matrix.optimizations }}" \
+             KCPPFLAGS="-O3" \
+             -j$(nproc) \
+             ${{ matrix.kernel_target }} modules
+        
+        # Show build statistics
+        echo "=== Build Statistics ==="
+        ccache --show-stats || true
+        ls -la ${{ matrix.kernel_file }}
+
+    - name: Install modules and create package
+      run: |
+        cd kernel-source
+        mkdir -p ../kernel-build/${{ matrix.arch }}/{boot,lib/modules,usr/src}
         
         # Copy kernel image
-        if [ -f arch/$ARCH/boot/bzImage ]; then
-          cp arch/$ARCH/boot/bzImage package-base/boot/vmlinuz-$KERNEL_RELEASE
-        elif [ -f arch/$ARCH/boot/Image ]; then
-          cp arch/$ARCH/boot/Image package-base/boot/vmlinuz-$KERNEL_RELEASE
-        elif [ -f arch/$ARCH/boot/zImage ]; then
-          cp arch/$ARCH/boot/zImage package-base/boot/vmlinuz-$KERNEL_RELEASE
-        fi
-        
-        # Copy System.map and config
-        cp System.map package-base/boot/System.map-$KERNEL_RELEASE
-        cp .config package-base/boot/config-$KERNEL_RELEASE
+        cp ${{ matrix.kernel_file }} ../kernel-build/${{ matrix.arch }}/boot/${{ matrix.kernel_name }}-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
         
         # Install modules
-        make INSTALL_MOD_PATH=package-base modules_install
+        make ARCH=${{ matrix.arch }} \
+             CROSS_COMPILE=${{ matrix.cross_compile }} \
+             INSTALL_MOD_PATH=../kernel-build/${{ matrix.arch }} \
+             modules_install
         
-        # Copy kernel headers
-        make INSTALL_HDR_PATH=package-base/usr headers_install
+        # Copy additional files
+        cp .config ../kernel-build/${{ matrix.arch }}/boot/config-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
+        cp System.map ../kernel-build/${{ matrix.arch }}/boot/System.map-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
+        
+        # Copy headers for DKMS modules
+        make ARCH=${{ matrix.arch }} \
+             CROSS_COMPILE=${{ matrix.cross_compile }} \
+             INSTALL_HDR_PATH=../kernel-build/${{ matrix.arch }}/usr \
+             headers_install
+        
+        # Create kernel source symlink info
+        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > ../kernel-build/${{ matrix.arch }}/lib/modules/*/source
+        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > ../kernel-build/${{ matrix.arch }}/lib/modules/*/build
 
-    - name: Build Debian package
+    - name: Generate package metadata
       run: |
-        cp -r package-base debian-package
-        mkdir -p debian-package/DEBIAN
-        
-        cat > debian-package/DEBIAN/control << EOF
-        Package: $KERNEL_NAME
-        Version: $KERNEL_VERSION-xyzvoid-$BUILD_DATE
-        Architecture: $TARGET_ARCH
-        Maintainer: $MAINTAINER <$MAINTAINER_EMAIL>
-        Description: XYZVoid Custom Linux Kernel $KERNEL_VERSION
-         Custom Linux kernel built from linux-$KERNEL_VERSION.y branch
-         Built by $MAINTAINER on $BUILD_DATE
-         Configuration: $KERNEL_CONFIG
-         .
-         This kernel includes custom patches and optimizations
-         for enhanced performance and compatibility.
-        EOF
-        
-        cat > debian-package/DEBIAN/postinst << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
-        
-        # Update initramfs if update-initramfs is available
-        if command -v update-initramfs >/dev/null 2>&1; then
-          update-initramfs -c -k $KERNEL_VERSION || true
-        fi
-        
-        # Update GRUB if available
-        if command -v update-grub >/dev/null 2>&1; then
-          update-grub || true
-        fi
-        
-        echo "XYZVoid kernel $KERNEL_VERSION installed successfully"
-        EOF
-        
-        cat > debian-package/DEBIAN/prerm << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
-        
-        # Remove initramfs
-        if command -v update-initramfs >/dev/null 2>&1; then
-          update-initramfs -d -k $KERNEL_VERSION || true
-        fi
-        EOF
-        
-        chmod +x debian-package/DEBIAN/postinst
-        chmod +x debian-package/DEBIAN/prerm
-        
-        dpkg-deb --build debian-package $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
-
-    - name: Build RPM package (Fedora)
-      run: |
-        mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-        
-        # Create source tarball
-        tar -czf ~/rpmbuild/SOURCES/$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.tar.gz -C package-base .
-        
-        cat > ~/rpmbuild/SPECS/$KERNEL_NAME.spec << EOF
-        Name:           $KERNEL_NAME
-        Version:        $KERNEL_VERSION
-        Release:        xyzvoid.$BUILD_DATE%{?dist}
-        Summary:        XYZVoid Custom Linux Kernel
-        
-        License:        GPLv2
-        URL:            https://github.com/$MAINTAINER/$KERNEL_NAME
-        Source0:        %{name}-%{version}-xyzvoid.tar.gz
-        
-        BuildArch:      $TARGET_ARCH
-        Packager:       $MAINTAINER <$MAINTAINER_EMAIL>
-        
-        %description
-        XYZVoid Custom Linux Kernel $KERNEL_VERSION built from linux-$KERNEL_VERSION.y branch.
-        This kernel includes custom patches and optimizations for enhanced performance
-        and compatibility. Built by $MAINTAINER on $BUILD_DATE.
-        
-        Configuration used: $KERNEL_CONFIG
-        
-        %prep
-        %setup -q -n .
-        
-        %build
-        # Nothing to build, kernel already compiled
-        
-        %install
-        cp -r * %{buildroot}/
-        
-        %post
-        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
-        
-        # Update initramfs
-        if command -v dracut >/dev/null 2>&1; then
-          dracut --force /boot/initramfs-\$KERNEL_VERSION.img \$KERNEL_VERSION || true
-        fi
-        
-        # Update GRUB
-        if command -v grub2-mkconfig >/dev/null 2>&1; then
-          grub2-mkconfig -o /boot/grub2/grub.cfg || true
-        elif command -v grub-mkconfig >/dev/null 2>&1; then
-          grub-mkconfig -o /boot/grub/grub.cfg || true
-        fi
-        
-        echo "XYZVoid kernel \$KERNEL_VERSION installed successfully"
-        
-        %preun
-        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
-        
-        # Remove initramfs
-        rm -f /boot/initramfs-\$KERNEL_VERSION.img || true
-        
-        %files
-        /boot/*
-        /lib/modules/*
-        /usr/include/*
-        
-        %changelog
-        * $(date +'%a %b %d %Y') $MAINTAINER <$MAINTAINER_EMAIL> - $KERNEL_VERSION-xyzvoid.$BUILD_DATE
-        - Built XYZVoid kernel $KERNEL_VERSION from linux-$KERNEL_VERSION.y branch
-        - Configuration: $KERNEL_CONFIG
-        - Architecture: $TARGET_ARCH
-        - Custom patches and optimizations applied
-        - Enhanced performance and compatibility improvements
-        EOF
-        
-        rpmbuild -bb ~/rpmbuild/SPECS/$KERNEL_NAME.spec
-        cp ~/rpmbuild/RPMS/$TARGET_ARCH/$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE*.rpm .
-
-    - name: Build Arch Linux package
-      run: |
-        mkdir -p arch-package
-        cp -r package-base/* arch-package/
-        
-        cat > PKGBUILD << EOF
-        # Maintainer: $MAINTAINER <$MAINTAINER_EMAIL>
-        
-        pkgname=$KERNEL_NAME
-        pkgver=$KERNEL_VERSION.xyzvoid.$BUILD_DATE
-        pkgrel=1
-        pkgdesc="XYZVoid Custom Linux Kernel $KERNEL_VERSION"
-        arch=('$TARGET_ARCH')
-        url="https://github.com/$MAINTAINER/$KERNEL_NAME"
-        license=('GPL2')
-        provides=('linux')
-        conflicts=('linux')
-        backup=('etc/mkinitcpio.d/$KERNEL_NAME.preset')
-        
-        package() {
-          cd "\$srcdir"
-          
-          # Install kernel files
-          install -Dm644 ../arch-package/boot/vmlinuz-$KERNEL_RELEASE "\$pkgdir/boot/vmlinuz-$KERNEL_NAME"
-          install -Dm644 ../arch-package/boot/System.map-$KERNEL_RELEASE "\$pkgdir/boot/System.map-$KERNEL_NAME"
-          install -Dm644 ../arch-package/boot/config-$KERNEL_RELEASE "\$pkgdir/boot/config-$KERNEL_NAME"
-          
-          # Install modules
-          cp -r ../arch-package/lib "\$pkgdir/"
-          
-          # Install headers
-          cp -r ../arch-package/usr "\$pkgdir/"
-          
-          # Create mkinitcpio preset
-          install -Dm644 /dev/stdin "\$pkgdir/etc/mkinitcpio.d/$KERNEL_NAME.preset" << PRESET
-        # mkinitcpio preset file for $KERNEL_NAME
-        
-        ALL_config="/etc/mkinitcpio.conf"
-        ALL_kver="$KERNEL_RELEASE"
-        
-        PRESETS=('default' 'fallback')
-        
-        #default_config="/etc/mkinitcpio.conf"
-        default_image="/boot/initramfs-$KERNEL_NAME.img"
-        #default_options=""
-        
-        #fallback_config="/etc/mkinitcpio.conf"
-        fallback_image="/boot/initramfs-$KERNEL_NAME-fallback.img"
-        fallback_options="-S autodetect"
-        PRESET
-        }
-        EOF
-        
-        # Create package
-        mkdir -p pkg src
-        fakeroot -- bash -c '
-          source PKGBUILD
-          package
-          cd pkg
-          tar -czf ../$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz *
-        '
-
-    - name: Build Void Linux package
-      run: |
-        mkdir -p void-package/destdir
-        cp -r package-base/* void-package/destdir/
-        
-        cat > void-package/template << EOF
-        # Template file for '$KERNEL_NAME'
-        pkgname=$KERNEL_NAME
-        version=$KERNEL_VERSION.xyzvoid.$BUILD_DATE
-        revision=1
-        archs="$TARGET_ARCH"
-        wrksrc="\${pkgname}-\${version}"
-        build_style=meta
-        short_desc="XYZVoid Custom Linux Kernel $KERNEL_VERSION"
-        maintainer="$MAINTAINER <$MAINTAINER_EMAIL>"
-        license="GPL-2.0-only"
-        homepage="https://github.com/$MAINTAINER/$KERNEL_NAME"
-        
-        provides="linux-\${version}_\${revision}"
-        conflicts="linux"
-        
-        do_install() {
-          # Install kernel files
-          vinstall destdir/boot/vmlinuz-$KERNEL_RELEASE 644 boot vmlinuz-$KERNEL_NAME
-          vinstall destdir/boot/System.map-$KERNEL_RELEASE 644 boot System.map-$KERNEL_NAME
-          vinstall destdir/boot/config-$KERNEL_RELEASE 644 boot config-$KERNEL_NAME
-          
-          # Install modules
-          vcopy destdir/lib usr/
-          
-          # Install headers
-          vcopy destdir/usr/include usr/
-        }
-        
-        post_install() {
-          # Generate initramfs
-          if command -v dracut >/dev/null 2>&1; then
-            dracut --force /boot/initramfs-$KERNEL_NAME.img $KERNEL_RELEASE || true
-          fi
-          
-          # Update bootloader
-          if command -v update-grub >/dev/null 2>&1; then
-            update-grub || true
-          fi
-          
-          echo "XYZVoid kernel $KERNEL_RELEASE installed successfully"
-        }
-        
-        pre_remove() {
-          # Remove initramfs
-          rm -f /boot/initramfs-$KERNEL_NAME.img || true
-        }
-        EOF
-        
-        # Create xbps package
-        cd void-package
-        tar -czf ../$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps destdir template
-
-    - name: Generate changelog
-      run: |
-        # Get commit messages since last tag
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-        
-        if [ -n "$LAST_TAG" ]; then
-          COMMITS=$(git log --oneline --no-merges $LAST_TAG..HEAD | head -20)
-        else
-          COMMITS=$(git log --oneline --no-merges -10)
-        fi
-        
-        cat > CHANGELOG.md << EOF
-        # XYZVoid Kernel $KERNEL_VERSION Release
-        
-        **Built by:** $MAINTAINER  
-        **Build Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
-        **Architecture:** $TARGET_ARCH  
-        **Configuration:** $KERNEL_CONFIG  
-        **Kernel Version:** $KERNEL_VERSION-xyzvoid  
-        
-        ## 🚀 What's New
-        
-        This release of XYZVoid kernel is based on the latest linux-$KERNEL_VERSION.y stable branch with custom patches and optimizations for enhanced performance and compatibility.
-        
-        ### ✨ Features
-        - Custom kernel branding and version string
-        - Optimized build configuration for $TARGET_ARCH
-        - Enhanced compatibility patches
-        - Performance optimizations
-        - Security hardening improvements
-        
-        ### 📦 Available Packages
-        - **Debian/Ubuntu**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb\`
-        - **Fedora/RHEL/CentOS**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm\`
-        - **Arch Linux**: \`$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz\`
-        - **Void Linux**: \`$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps\`
-        - **Generic**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz\`
-        
-        ### 🔧 Installation Instructions
-        
-        #### Debian/Ubuntu
-        \`\`\`bash
-        sudo dpkg -i $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
-        sudo update-grub
-        \`\`\`
-        
-        #### Fedora/RHEL/CentOS
-        \`\`\`bash
-        sudo rpm -ivh $KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm
-        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-        \`\`\`
-        
-        #### Arch Linux
-        \`\`\`bash
-        sudo pacman -U $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz
-        sudo mkinitcpio -p $KERNEL_NAME
-        sudo grub-mkconfig -o /boot/grub/grub.cfg
-        \`\`\`
-        
-        #### Void Linux
-        \`\`\`bash
-        sudo xbps-install --force $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps
-        sudo update-grub
-        \`\`\`
-        
-        ### 📋 Recent Changes
-        
-        EOF
-        
-        if [ -n "$COMMITS" ]; then
-          echo "Recent commits included in this build:" >> CHANGELOG.md
-          echo '```' >> CHANGELOG.md
-          echo "$COMMITS" >> CHANGELOG.md
-          echo '```' >> CHANGELOG.md
-        else
-          echo "Initial release build from linux-$KERNEL_VERSION.y branch" >> CHANGELOG.md
-        fi
-        
-        cat >> CHANGELOG.md << EOF
-        
-        ### ⚠️ Important Notes
-        
-        - Always backup your current kernel before installing
-        - This is a custom kernel build and may not be suitable for all systems
-        - Test in a virtual machine or non-production environment first
-        - Report issues at: https://github.com/$MAINTAINER/$KERNEL_NAME/issues
-        
-        ### 🛠️ Build Information
-        
-        - **Source Branch**: linux-$KERNEL_VERSION.y
-        - **Commit SHA**: ${{ github.sha }}
-        - **Build Environment**: Ubuntu Latest (GitHub Actions)
-        - **Compiler**: GCC $(gcc --version | head -n1 | cut -d' ' -f4)
-        - **Build Jobs**: $JOBS parallel
-        
-        ---
-        
-        **Full Changelog**: https://github.com/${{ github.repository }}/compare/\${LAST_TAG:-$(git rev-list --max-parents=0 HEAD)}...${{ github.sha }}
-        EOF
-
-    - name: Create TAR.XZ archive
-      run: |
-        tar -cJf $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz -C package-base .
-
-    - name: Generate build information
-      run: |
-        cat > build-info.txt << EOF
+        cd kernel-build
+        
+        # Create detailed build info
+        cat > ${{ matrix.arch }}/BUILD_INFO << EOF
+        ================================
         XYZVoid Kernel Build Information
         ================================
         
-        Kernel Name: $KERNEL_NAME
-        Kernel Version: $KERNEL_VERSION-xyzvoid
-        Architecture: $TARGET_ARCH
-        Configuration: $KERNEL_CONFIG
-        Build Date: $(date)
-        Maintainer: $MAINTAINER
+        Kernel Name: ${{ env.KERNEL_NAME }}
+        Version: ${{ env.KERNEL_VERSION }}
+        Architecture: ${{ matrix.arch }}
+        Maintainer: ${{ env.MAINTAINER }}
         
         Build Details:
-        - Commit SHA: ${{ github.sha }}
-        - Branch: ${{ github.ref_name }}
-        - Build Environment: ${{ runner.os }}
-        - GCC Version: $(gcc --version | head -n1)
-        - Make Version: $(make --version | head -n1)
+        - Compiler: Clang/LLVM ${{ env.LLVM_VERSION }}
+        - Build Date: ${{ env.BUILD_TIMESTAMP }}
+        - Git Commit: ${{ env.KERNEL_FULL_COMMIT }}
+        - Optimizations: ${{ matrix.optimizations }}
+        - LTO: Thin LTO enabled
+        - CFI: Control Flow Integrity enabled
+        - Security: Stack protection, FORTIFY_SOURCE
         
-        Package Files Generated:
-        - Debian: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
-        - Fedora: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm
-        - Arch: $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz
-        - Void: $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps
-        - Generic: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz
+        Features:
+        - ZSTD/LZ4 compression support
+        - Transparent huge pages
+        - High-resolution timers
+        - Preemptive scheduling
+        - Enhanced security features
         
-        Installation Notes:
-        - Contains kernel image: /boot/vmlinuz-$KERNEL_RELEASE
-        - Contains system map: /boot/System.map-$KERNEL_RELEASE
-        - Contains kernel config: /boot/config-$KERNEL_RELEASE
-        - Contains kernel modules: /lib/modules/$KERNEL_RELEASE/
-        - Contains kernel headers: /usr/include/
+        Package Contents:
+        - boot/: Kernel image, config, System.map
+        - lib/modules/: Kernel modules
+        - usr/include/: Kernel headers
+        EOF
+        
+        # Create installation script
+        cat > ${{ matrix.arch }}/install.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        KERNEL_VERSION=$(ls "$SCRIPT_DIR/lib/modules/" | head -n1)
+        
+        echo "Installing XYZVoid Kernel..."
+        echo "Kernel version: $KERNEL_VERSION"
+        
+        # Check if running as root
+        if [ "$EUID" -ne 0 ]; then
+            echo "Please run as root (use sudo)"
+            exit 1
+        fi
+        
+        # Backup current kernel (optional)
+        read -p "Create backup of current kernel? [y/N]: " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            mkdir -p /boot/backup-$(date +%Y%m%d)
+            cp /boot/vmlinuz* /boot/backup-$(date +%Y%m%d)/ 2>/dev/null || true
+            cp /boot/initrd* /boot/backup-$(date +%Y%m%d)/ 2>/dev/null || true
+        fi
+        
+        # Install kernel files
+        echo "Installing kernel files..."
+        cp -r boot/* /boot/
+        cp -r lib/modules/* /lib/modules/
+        cp -r usr/include/* /usr/include/ 2>/dev/null || true
+        
+        # Update initramfs
+        echo "Updating initramfs..."
+        if command -v update-initramfs >/dev/null 2>&1; then
+            update-initramfs -c -k "$KERNEL_VERSION"
+        elif command -v mkinitcpio >/dev/null 2>&1; then
+            mkinitcpio -k "$KERNEL_VERSION" -g "/boot/initramfs-$KERNEL_VERSION.img"
+        elif command -v dracut >/dev/null 2>&1; then
+            dracut "/boot/initramfs-$KERNEL_VERSION.img" "$KERNEL_VERSION"
+        fi
+        
+        # Update bootloader
+        echo "Updating bootloader..."
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+            grub-mkconfig -o /boot/grub/grub.cfg
+        elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg
+        fi
+        
+        echo "Installation complete!"
+        echo "Please reboot to use the new kernel."
+        EOF
+        
+        chmod +x ${{ matrix.arch }}/install.sh
+
+    - name: Create optimized archive
+      run: |
+        cd kernel-build
+        
+        # Create compressed archive with best compression
+        echo "Creating archive..."
+        tar --zstd -cf ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-${{ matrix.arch }}-${{ env.KERNEL_DATE }}.tar.zst ${{ matrix.arch }}/
+        
+        # Also create traditional gzip for compatibility
+        tar -czf ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-${{ matrix.arch }}-${{ env.KERNEL_DATE }}.tar.gz ${{ matrix.arch }}/
+        
+        # Generate checksums
+        sha256sum *.tar.* > checksums-${{ matrix.arch }}.sha256
+        
+        # Show archive info
+        echo "=== Archive Information ==="
+        ls -lah *.tar.*
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-${{ matrix.arch }}-${{ env.KERNEL_DATE }}
+        path: |
+          kernel-build/*.tar.*
+          kernel-build/checksums-*.sha256
+        retention-days: 30
+        compression-level: 1
+
+  create-release:
+    needs: build-kernel
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    
+    steps:
+    - name: Setup release environment
+      run: |
+        echo "KERNEL_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+          echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+        else
+          echo "RELEASE_TAG=v6.15.0-xyzvoid-$(date +'%Y%m%d')" >> $GITHUB_ENV
+        fi
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts
+
+    - name: Organize release assets
+      run: |
+        mkdir -p release-files
+        find release-artifacts -name "*.tar.*" -exec cp {} release-files/ \;
+        find release-artifacts -name "checksums-*.sha256" -exec cp {} release-files/ \;
+        
+        # Combine all checksums
+        cat release-files/checksums-*.sha256 > release-files/SHA256SUMS
+        rm release-files/checksums-*.sha256
+        
+        echo "=== Release Files ==="
+        ls -la release-files/
+
+    - name: Generate comprehensive release notes
+      run: |
+        cat > RELEASE_NOTES.md << 'EOF'
+        # 🚀 XYZVoid Kernel ${{ env.RELEASE_TAG }}
+        
+        A high-performance, security-hardened Linux kernel based on the stable 6.15.y branch.
+        
+        ## 📋 Release Information
+        
+        | Field | Value |
+        |-------|-------|
+        | **Version** | Linux ${{ env.KERNEL_VERSION }} |
+        | **Maintainer** | ${{ env.MAINTAINER }} |
+        | **Build Date** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
+        | **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |
+        | **Architectures** | x86_64, ARM64 |
+        
+        ## ✨ Key Features
+        
+        ### 🔒 Security Enhancements
+        - **Control Flow Integrity (CFI)** - Prevents ROP/JOP attacks
+        - **Shadow Call Stack** - Additional return address protection  
+        - **Stack Protection** - Strong stack smashing protection
+        - **FORTIFY_SOURCE** - Enhanced buffer overflow detection
+        - **SLAB Randomization** - Randomized memory allocator
+        
+        ### ⚡ Performance Optimizations
+        - **Thin LTO** - Link-time optimization for better performance
+        - **-O3 Optimization** - Maximum compiler optimization
+        - **x86_64-v3 Target** - Modern CPU instruction support
+        - **ZSTD/LZ4 Compression** - Faster compression algorithms
+        - **Transparent Huge Pages** - Improved memory management
+        
+        ### 🎯 Kernel Features
+        - **Preemptive Scheduling** - Better desktop responsiveness
+        - **High-Resolution Timers** - Precise timing for multimedia
+        - **Tickless Operation** - Reduced power consumption
+        - **ZRAM/ZSWAP Support** - Compressed memory and swap
+        
+        ## 📦 Available Downloads
+        
+        ### x86_64 (Intel/AMD 64-bit)
+        - `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst` - ZSTD compressed (recommended)
+        - `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.gz` - GZIP compressed (compatibility)
+        
+        ### ARM64 (AArch64)
+        - `xyzvoid-kernel-6.15.y-arm64-${{ env.KERNEL_DATE }}.tar.zst` - ZSTD compressed (recommended)  
+        - `xyzvoid-kernel-6.15.y-arm64-${{ env.KERNEL_DATE }}.tar.gz` - GZIP compressed (compatibility)
+        
+        ### Checksums
+        - `SHA256SUMS` - SHA256 checksums for all files
+        
+        ## 🛠️ Installation Guide
+        
+        ### Quick Installation (Automated)
+        ```bash
+        # Download and extract the kernel package
+        wget https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst
+        tar --zstd -xf xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst
+        
+        # Run the installation script
+        cd x86_64
+        sudo ./install.sh
+        
+        # Reboot to use the new kernel
+        sudo reboot
+        ```
+        
+        ### Manual Installation
+        
+        #### For Ubuntu/Debian:
+        ```bash
+        # Extract the package
+        tar --zstd -xf xyzvoid-kernel-*.tar.zst
+        cd x86_64  # or arm64
+        
+        # Install kernel files
+        sudo cp boot/* /boot/
+        sudo cp -r lib/modules/* /lib/modules/
+        
+        # Update initramfs
+        KERNEL_VERSION=$(ls lib/modules/)
+        sudo update-initramfs -c -k $KERNEL_VERSION
+        
+        # Update GRUB
+        sudo update-grub
+        sudo reboot
+        ```
+        
+        #### For Fedora/RHEL/CentOS:
+        ```bash
+        # Extract the package
+        tar --zstd -xf xyzvoid-kernel-*.tar.zst
+        cd x86_64  # or arm64
+        
+        # Install kernel files
+        sudo cp boot/* /boot/
+        sudo cp -r lib/modules/* /lib/modules/
+        
+        # Update initramfs
+        KERNEL_VERSION=$(ls lib/modules/)
+        sudo dracut /boot/initramfs-$KERNEL_VERSION.img $KERNEL_VERSION
+        
+        # Update GRUB
+        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+        sudo reboot
+        ```
+        
+        #### For Arch Linux:
+        ```bash
+        # Extract the package
+        tar --zstd -xf xyzvoid-kernel-*.tar.zst
+        cd x86_64  # or arm64
+        
+        # Install kernel files
+        sudo cp boot/* /boot/
+        sudo cp -r lib/modules/* /lib/modules/
+        
+        # Update initramfs
+        KERNEL_VERSION=$(ls lib/modules/)
+        sudo mkinitcpio -k $KERNEL_VERSION -g /boot/initramfs-$KERNEL_VERSION.img
+        
+        # Update bootloader (GRUB)
+        sudo grub-mkconfig -o /boot/grub/grub.cfg
+        sudo reboot
+        ```
+        
+        #### For openSUSE:
+        ```bash
+        # Extract the package
+        tar --zstd -xf xyzvoid-kernel-*.tar.zst
+        cd x86_64  # or arm64
+        
+        # Install kernel files
+        sudo cp boot/* /boot/
+        sudo cp -r lib/modules/* /lib/modules/
+        
+        # Update initrd
+        KERNEL_VERSION=$(ls lib/modules/)
+        sudo dracut /boot/initrd-$KERNEL_VERSION $KERNEL_VERSION
+        
+        # Update GRUB
+        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+        sudo reboot
+        ```
+        
+        ### Advanced Installation Options
+        
+        #### Custom GRUB Entry
+        Add a custom GRUB entry in `/etc/grub.d/40_custom`:
+        ```bash
+        menuentry 'XYZVoid Kernel' {
+            set root=(hd0,1)  # Adjust for your boot partition
+            linux /boot/vmlinuz-6.15.y-xyzvoid-kernel root=/dev/sda1  # Adjust root device
+            initrd /boot/initramfs-6.15.y-xyzvoid-kernel.img
+        }
+        ```
+        
+        #### Kernel Parameters
+        Recommended kernel parameters for optimal performance:
+        ```
+        mitigations=auto
+        transparent_hugepage=madvise  
+        zswap.enabled=1
+        zswap.compressor=lz4
+        quiet splash
+        ```
+        
+        ## 🔍 Verification
+        
+        ### Verify Download Integrity
+        ```bash
+        # Download checksums
+        wget https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/SHA256SUMS
+        
+        # Verify checksum
+        sha256sum -c SHA256SUMS
+        ```
+        
+        ### Verify Installation
+        ```bash
+        # Check kernel version after reboot
+        uname -r
+        
+        # Should show: 6.15.y-xyzvoid-kernel (or similar)
+        
+        # Check kernel features
+        zcat /proc/config.gz | grep -E "(LTO|CFI|FORTIFY)"
+        ```
+        
+        ## 🐛 Troubleshooting
+        
+        ### Boot Issues
+        1. **Kernel panic on boot**: Use previous kernel from GRUB menu
+        2. **Missing modules**: Ensure initramfs was properly generated
+        3. **Graphics issues**: Add `nomodeset` to kernel parameters temporarily
+        
+        ### Recovery
+        ```bash
+        # Boot from live USB/rescue mode
+        # Mount root filesystem
+        sudo mount /dev/sdXY /mnt
+        
+        # Chroot into system
+        sudo chroot /mnt
+        
+        # Remove problematic kernel
+        rm /boot/*xyzvoid-kernel*
+        rm -rf /lib/modules/*xyzvoid-kernel*
+        
+        # Update bootloader
+        update-grub  # or grub-mkconfig
+        ```
+        
+        ## 📞 Support
+        
+        - **Issues**: [GitHub Issues](https://github.com/${{ github.repository }}/issues)
+        - **Discussions**: [GitHub Discussions](https://github.com/${{ github.repository }}/discussions)
+        - **Security**: Report security issues privately to ${{ env.MAINTAINER }}
+        
+        ## 📄 License
+        
+        This kernel is distributed under the GNU General Public License v2.0, same as the Linux kernel.
+        
+        ---
+        
+        **⚠️ Important Notes:**
+        - Always backup your system before installing a custom kernel
+        - Keep your previous kernel available for recovery
+        - This kernel may not be suitable for production servers
+        - Test thoroughly in a virtual machine first
+        
+        **Built with ❤️ using GitHub Actions and LLVM/Clang ${{ env.LLVM_VERSION }}**
         EOF
 
-    - name: Upload Debian package
-      uses: actions/upload-artifact@v4
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
       with:
-        name: ${{ env.KERNEL_NAME }}-debian-${{ env.TARGET_ARCH }}
-        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.deb
-        retention-days: 30
-
-    - name: Upload RPM package
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.KERNEL_NAME }}-fedora-${{ env.TARGET_ARCH }}
-        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid.${{ env.BUILD_DATE }}*.rpm
-        retention-days: 30
-
-    - name: Upload Arch package
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.KERNEL_NAME }}-arch-${{ env.TARGET_ARCH }}
-        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}-1-${{ env.TARGET_ARCH }}.pkg.tar.gz
-        retention-days: 30
-
-    - name: Upload Void package
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.KERNEL_NAME }}-void-${{ env.TARGET_ARCH }}
-        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}_1.${{ env.TARGET_ARCH }}.xbps
-        retention-days: 30
-
-    - name: Upload TAR.XZ archive
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.KERNEL_NAME }}-generic-${{ env.TARGET_ARCH }}
-        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.tar.xz
-        retention-days: 30
-
-    - name: Upload build information
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-info-${{ env.TARGET_ARCH }}
-        path: |
-          build-info.txt
-          CHANGELOG.md
-        retention-days: 30
-
-    - name: Create release on tag
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.deb
-          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid.${{ env.BUILD_DATE }}*.rpm
-          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}-1-${{ env.TARGET_ARCH }}.pkg.tar.gz
-          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}_1.${{ env.TARGET_ARCH }}.xbps
-          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.tar.xz
-          build-info.txt
-        body_path: CHANGELOG.md
-        name: "XYZVoid Kernel ${{ env.KERNEL_VERSION }}-xyzvoid (${{ env.TARGET_ARCH }})"
-        tag_name: ${{ github.ref_name }}
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: "🚀 XYZVoid Kernel ${{ env.RELEASE_TAG }}"
+        body_path: RELEASE_NOTES.md
+        files: release-files/*
         draft: false
         prerelease: false
+        make_latest: true
+        generate_release_notes: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Update release statistics
+      run: |
+        echo "::notice title=Release Created::XYZVoid Kernel ${{ env.RELEASE_TAG }} has been released successfully!"
+        echo "::notice title=Architectures::Built for x86_64 and ARM64"
+        echo "::notice title=Compiler::Built with Clang/LLVM ${{ env.LLVM_VERSION }}"
+        echo "::notice title=Download::https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
