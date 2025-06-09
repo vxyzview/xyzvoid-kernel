@@ -22,7 +22,7 @@ env:
   KERNEL_NAME: xyzvoid-kernel
   MAINTAINER: vxyzview
   KERNEL_VERSION: 6.15.y
-  LLVM_VERSION: 20
+  LLVM_VERSION: "latest-available"
   CACHE_VERSION: v3
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
             kernel_file: "arch/x86/boot/bzImage"
             kernel_name: "vmlinuz"
             optimizations: "-O3 -march=x86-64-v3 -mtune=generic"
-
+    
     steps:
     - name: Maximize build space
       uses: easimon/maximize-build-space@master
@@ -77,35 +77,69 @@ jobs:
           gcc-aarch64-linux-gnu \
           libc6-dev-arm64-cross
 
-    - name: Install LLVM/Clang ${{ env.LLVM_VERSION }}
+    - name: Install latest LLVM/Clang (targeting ${{ env.LLVM_VERSION }})
       run: |
-        # Download and install specific LLVM version
-        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        # Add LLVM repository with modern GPG key management
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
         echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
         
-        # Install latest available version (closest to 20.1.6)
         sudo apt-get update
-        sudo apt-get install -y \
-          clang-20 \
-          lld-20 \
-          llvm-20 \
-          llvm-20-dev \
-          clang-tools-20
         
-        # Set up alternatives
-        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 100
-        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 100
-        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-20 100
-        sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-20 100
-        sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-20 100
+        # Check available LLVM versions
+        echo "Available LLVM versions:"
+        apt-cache search --names-only '^clang-[0-9]+$' | head -10
         
+        # Install latest available version (20 is likely the newest available)
+        AVAILABLE_VERSIONS=(20 19 18)
+        LLVM_VER="20"
+        
+        for ver in "${AVAILABLE_VERSIONS[@]}"; do
+          if apt-cache show clang-$ver >/dev/null 2>&1; then
+            LLVM_VER=$ver
+            echo "Installing LLVM/Clang version $ver"
+            break
+          fi
+        done
+        
+        if [ -z "$LLVM_VER" ]; then
+          echo "No suitable LLVM version found, using system default"
+          sudo apt-get install -y clang lld llvm llvm-dev clang-tools
+          LLVM_VER=""
+        else
+          sudo apt-get install -y \
+            clang-$LLVM_VER \
+            lld-$LLVM_VER \
+            llvm-$LLVM_VER \
+            llvm-$LLVM_VER-dev \
+            clang-tools-$LLVM_VER \
+            libc++1-$LLVM_VER \
+            libc++abi1-$LLVM_VER
+          
+          # Set up alternatives
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-$LLVM_VER 100
+          sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-$LLVM_VER 100
+        fi
+        
+        # Verify installation
+        echo "=== LLVM/Clang Installation Info ==="
         clang --version
-        ld.lld --version
+        ld.lld --version || echo "lld not available"
+        llvm-ar --version || echo "llvm-ar not available"
+        
+        # Update environment variable with actual version
+        ACTUAL_VER=$(clang --version | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+        echo "ACTUAL_LLVM_VERSION=$ACTUAL_VER" >> $GITHUB_ENV
 
     - name: Setup enhanced ccache
       uses: hendrikmuhs/ccache-action@v1.2
       with:
-        key: ${{ env.CACHE_VERSION }}-${{ runner.os }}-${{ matrix.arch }}-kernel-${{ env.LLVM_VERSION }}
+        key: ${{ env.CACHE_VERSION }}-${{ runner.os }}-${{ matrix.arch }}-kernel-${{ env.ACTUAL_LLVM_VERSION || 'latest' }}
         max-size: 4G
         save: true
         restore-keys: |
@@ -252,7 +286,7 @@ jobs:
         Maintainer: ${{ env.MAINTAINER }}
         
         Build Details:
-        - Compiler: Clang/LLVM ${{ env.LLVM_VERSION }}
+        - Compiler: Clang/LLVM ${{ env.ACTUAL_LLVM_VERSION || env.LLVM_VERSION }}
         - Build Date: ${{ env.BUILD_TIMESTAMP }}
         - Git Commit: ${{ env.KERNEL_FULL_COMMIT }}
         - Optimizations: ${{ matrix.optimizations }}
@@ -406,7 +440,7 @@ jobs:
         | **Version** | Linux ${{ env.KERNEL_VERSION }} |
         | **Maintainer** | ${{ env.MAINTAINER }} |
         | **Build Date** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
-        | **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |
+        | **Compiler** | Clang/LLVM ${{ env.ACTUAL_LLVM_VERSION || env.LLVM_VERSION }} |
         | **Architectures** | x86_64, ARM64 |
         
         ## ✨ Key Features
@@ -624,7 +658,7 @@ jobs:
         - This kernel may not be suitable for production servers
         - Test thoroughly in a virtual machine first
         
-        **Built with ❤️ using GitHub Actions and LLVM/Clang ${{ env.LLVM_VERSION }}**
+        **Built with ❤️ using GitHub Actions and LLVM/Clang ${{ env.ACTUAL_LLVM_VERSION || env.LLVM_VERSION }}**
         EOF
 
     - name: Create Release
@@ -645,5 +679,5 @@ jobs:
       run: |
         echo "::notice title=Release Created::XYZVoid Kernel ${{ env.RELEASE_TAG }} has been released successfully!"
         echo "::notice title=Architectures::Built for x86_64 and ARM64"
-        echo "::notice title=Compiler::Built with Clang/LLVM ${{ env.LLVM_VERSION }}"
+        echo "::notice title=Compiler::Built with Clang/LLVM ${{ env.ACTUAL_LLVM_VERSION || env.LLVM_VERSION }}"
         echo "::notice title=Download::https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
