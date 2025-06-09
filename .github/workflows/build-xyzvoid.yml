@@ -87,7 +87,7 @@ jobs:
         
         # Check available LLVM versions
         echo "Available LLVM versions:"
-        apt-cache search --names-only '^clang-[0-9]+$' | head -10
+        apt-cache search --names-only '^clang-[0-20]+$' | head -10
         
         # Install latest available version (20 is likely the newest available)
         AVAILABLE_VERSIONS=(20 19 18)
