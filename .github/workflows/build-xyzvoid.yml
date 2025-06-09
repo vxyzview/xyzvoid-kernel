@@ -22,7 +22,7 @@ env:
   KERNEL_NAME: xyzvoid-kernel
   MAINTAINER: vxyzview
   KERNEL_VERSION: 6.15.y
-  LLVM_VERSION: "20.1.6"
+  LLVM_VERSION: "20"
   CACHE_VERSION: v4
 
 jobs:
@@ -31,20 +31,25 @@ jobs:
     
     steps:
     - name: Maximize build space
-      uses: easimon/maximize-build-space@master
+      uses: easimon/maximize-build-space@v2
       with:
-        root-reserve-mb: 4096
-        swap-size-mb: 2048
+        root-reserve-mb: 8192
+        swap-size-mb: 4096
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 50
+
     - name: Install build dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
           build-essential \
           libncurses-dev \
           bison \
@@ -59,68 +64,57 @@ jobs:
           xz-utils \
           zstd \
           ccache \
+          lld \
           python3-pip \
           rsync \
-          pahole
+          pahole \
+          dwarves
 
-    - name: Install LLVM/Clang ${{ env.LLVM_VERSION }} from GitHub
+    - name: Install LLVM/Clang 20 (Latest Stable)
       run: |
-        echo "Installing LLVM/Clang ${{ env.LLVM_VERSION }} from GitHub releases..."
+        # Add LLVM 19 repository (latest stable as of June 2025)
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{ env.LLVM_VERSION }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
         
-        # Create installation directory
-        sudo mkdir -p /opt/llvm
-        cd /tmp
+        sudo apt-get update -qq
         
-        # Download LLVM release
-        LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
-        echo "Downloading from: $LLVM_URL"
+        # Install LLVM/Clang 20 toolchain
+        sudo apt-get install -y --no-install-recommends \
+          clang-${{ env.LLVM_VERSION }} \
+          lld-${{ env.LLVM_VERSION }} \
+          llvm-${{ env.LLVM_VERSION }} \
+          llvm-${{ env.LLVM_VERSION }}-dev \
+          clang-tools-${{ env.LLVM_VERSION }} \
+          libc++1-${{ env.LLVM_VERSION }} \
+          libc++abi1-${{ env.LLVM_VERSION }}
         
-        wget -O llvm.tar.xz "$LLVM_URL"
-        
-        # Extract and install
-        sudo tar -xf llvm.tar.xz -C /opt/llvm --strip-components=1
-        
-        # Add to PATH and create symlinks
-        echo "/opt/llvm/bin" | sudo tee -a /etc/environment
-        export PATH="/opt/llvm/bin:$PATH"
-        
-        # Create system-wide symlinks
-        sudo ln -sf /opt/llvm/bin/clang /usr/local/bin/clang
-        sudo ln -sf /opt/llvm/bin/clang++ /usr/local/bin/clang++
-        sudo ln -sf /opt/llvm/bin/ld.lld /usr/local/bin/ld.lld
-        sudo ln -sf /opt/llvm/bin/llvm-ar /usr/local/bin/llvm-ar
-        sudo ln -sf /opt/llvm/bin/llvm-nm /usr/local/bin/llvm-nm
-        sudo ln -sf /opt/llvm/bin/llvm-strip /usr/local/bin/llvm-strip
-        sudo ln -sf /opt/llvm/bin/llvm-objcopy /usr/local/bin/llvm-objcopy
-        sudo ln -sf /opt/llvm/bin/llvm-ranlib /usr/local/bin/llvm-ranlib
-        
-        # Update library path
-        echo "/opt/llvm/lib" | sudo tee /etc/ld.so.conf.d/llvm.conf
-        sudo ldconfig
+        # Set up alternatives for consistent toolchain access
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/llvm-objcopy llvm-objcopy /usr/bin/llvm-objcopy-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/llvm-nm llvm-nm /usr/bin/llvm-nm-${{ env.LLVM_VERSION }} 100
+        sudo update-alternatives --install /usr/bin/llvm-ranlib llvm-ranlib /usr/bin/llvm-ranlib-${{ env.LLVM_VERSION }} 100
         
         # Verify installation
-        echo "=== LLVM/Clang Installation Verification ==="
-        /opt/llvm/bin/clang --version
-        /opt/llvm/bin/ld.lld --version
-        /opt/llvm/bin/llvm-ar --version
-        
-        # Update environment for subsequent steps
-        echo "/opt/llvm/bin" >> $GITHUB_PATH
-        echo "LLVM_INSTALLED_VERSION=${{ env.LLVM_VERSION }}" >> $GITHUB_ENV
+        echo "=== LLVM/Clang ${{ env.LLVM_VERSION }} Installation ==="
+        clang --version
+        ld.lld --version
+        llvm-ar --version
 
     - name: Setup enhanced ccache
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         key: ${{ env.CACHE_VERSION }}-${{ runner.os }}-x86_64-kernel-${{ env.LLVM_VERSION }}
-        max-size: 4G
+        max-size: 6G
         save: true
         restore-keys: |
           ${{ env.CACHE_VERSION }}-${{ runner.os }}-x86_64-kernel-
 
-    - name: Clone kernel source
+    - name: Set build environment variables
       run: |
-        git clone --depth=50 --branch=linux-6.15.y https://github.com/${{ github.repository_owner }}/${{ env.KERNEL_NAME }}.git kernel-source
-        cd kernel-source
         echo "KERNEL_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         echo "KERNEL_FULL_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
         echo "KERNEL_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
@@ -128,8 +122,7 @@ jobs:
 
     - name: Configure kernel for x86_64
       run: |
-        cd kernel-source
-        export PATH="/opt/llvm/bin:/usr/lib/ccache:$PATH"
+        export PATH="/usr/lib/ccache:$PATH"
         export CC="ccache clang"
         export CXX="ccache clang++"
         export HOSTCC="clang"
@@ -137,66 +130,77 @@ jobs:
         export LLVM=1
         export LLVM_IAS=1
         
-        # Base configuration
+        # Start with x86_64 defconfig
         make ARCH=x86_64 defconfig
-        LOCALVERSION_SUFFIX="-${{ env.KERNEL_NAME }}"
         
-        # Performance and security optimizations
-        scripts/config --set-str CONFIG_LOCALVERSION "$LOCALVERSION_SUFFIX"
+        # Set kernel version and name
+        scripts/config --set-str CONFIG_LOCALVERSION "-${{ env.KERNEL_NAME }}"
+        
+        # Performance optimizations
         scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
         scripts/config --enable CONFIG_LTO_CLANG_THIN
         scripts/config --enable CONFIG_CFI_CLANG
-        scripts/config --enable CONFIG_SHADOW_CALL_STACK
         scripts/config --enable CONFIG_FORTIFY_SOURCE
         scripts/config --enable CONFIG_STACKPROTECTOR_STRONG
+        
+        # Memory management optimizations
         scripts/config --enable CONFIG_SLAB_FREELIST_RANDOM
         scripts/config --enable CONFIG_SHUFFLE_PAGE_ALLOCATOR
+        scripts/config --enable CONFIG_TRANSPARENT_HUGEPAGE
+        scripts/config --enable CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS
         
-        # Performance features
+        # Scheduler and timing optimizations
         scripts/config --enable CONFIG_PREEMPT_VOLUNTARY
         scripts/config --enable CONFIG_NO_HZ_IDLE
         scripts/config --enable CONFIG_HIGH_RES_TIMERS
-        scripts/config --enable CONFIG_TRANSPARENT_HUGEPAGE
+        
+        # Compression and storage optimizations
         scripts/config --enable CONFIG_ZSTD_COMPRESS
         scripts/config --enable CONFIG_LZ4_COMPRESS
         scripts/config --enable CONFIG_ZRAM
         scripts/config --enable CONFIG_ZSWAP
+        scripts/config --enable CONFIG_ZSWAP_DEFAULT_ON
+        scripts/config --set-str CONFIG_ZSWAP_COMPRESSOR_DEFAULT "lz4"
+        scripts/config --set-str CONFIG_ZSWAP_ZPOOL_DEFAULT "zsmalloc"
         
-        # x86_64 specific optimizations
+        # Modern CPU features for x86_64-v3
         scripts/config --enable CONFIG_X86_64
-        scripts/config --enable CONFIG_GENERIC_CPU
-        scripts/config --enable CONFIG_X86_INTEL_PSTATE
-        scripts/config --enable CONFIG_X86_AMD_PSTATE
-        scripts/config --enable CONFIG_CPU_SUP_INTEL
-        scripts/config --enable CONFIG_CPU_SUP_AMD
+        scripts/config --enable CONFIG_64BIT
+        scripts/config --enable CONFIG_X86_TSC
+        scripts/config --enable CONFIG_X86_CMPXCHG64
+        scripts/config --enable CONFIG_X86_CMOV
+        scripts/config --enable CONFIG_X86_MCE
+        scripts/config --enable CONFIG_X86_MSR
+        scripts/config --enable CONFIG_X86_CPUID
         
-        # Debug configuration
+        # Security features
+        scripts/config --enable CONFIG_SECURITY
+        scripts/config --enable CONFIG_SECURITY_DMESG_RESTRICT
+        scripts/config --enable CONFIG_SECURITY_PERF_EVENTS_RESTRICT
+        scripts/config --enable CONFIG_HARDENED_USERCOPY
+        scripts/config --enable CONFIG_INIT_ON_ALLOC_DEFAULT_ON
+        scripts/config --enable CONFIG_INIT_ON_FREE_DEFAULT_ON
+        
+        # Debug configuration based on input
         if [ "${{ github.event.inputs.enable_debug }}" = "true" ]; then
           scripts/config --enable CONFIG_DEBUG_INFO
           scripts/config --enable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable CONFIG_DEBUG_INFO_COMPRESSED_ZSTD
         else
           scripts/config --disable CONFIG_DEBUG_INFO
           scripts/config --disable CONFIG_DEBUG_KERNEL
+          scripts/config --disable CONFIG_DEBUG_MISC
         fi
         
-        # Disable unnecessary features for size optimization
-        scripts/config --disable CONFIG_SOUND
-        scripts/config --disable CONFIG_SND
-        scripts/config --disable CONFIG_WIRELESS
-        scripts/config --disable CONFIG_WLAN
-        scripts/config --disable CONFIG_BLUETOOTH
-        scripts/config --module CONFIG_DRM
-        
+        # Finalize configuration
         make olddefconfig
         
-        # Verify important configs
-        echo "=== Key Configuration Check ==="
-        grep -E "(CONFIG_LOCALVERSION|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG)" .config || true
+        echo "=== Key Configuration Verification ==="
+        grep -E "(CONFIG_LOCALVERSION|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_ZSTD)" .config
 
     - name: Build kernel x86_64
       run: |
-        cd kernel-source
-        export PATH="/opt/llvm/bin:/usr/lib/ccache:$PATH"
+        export PATH="/usr/lib/ccache:$PATH"
         export CC="ccache clang"
         export CXX="ccache clang++"
         export HOSTCC="clang"
@@ -204,50 +208,44 @@ jobs:
         export LLVM=1
         export LLVM_IAS=1
         
-        # Build with x86_64-v3 optimizations
-        make ARCH=x86_64 \
-             KCFLAGS="-O3 -march=x86-64-v3 -mtune=generic" \
-             KCPPFLAGS="-O3" \
-             -j$(nproc) \
-             bzImage modules
+        # Optimized build flags for x86_64-v3
+        export KCFLAGS="-O3 -march=x86-64-v3 -mtune=generic -fno-semantic-interposition"
+        export KCPPFLAGS="-O3 -march=x86-64-v3"
         
-        # Show build statistics
+        # Build kernel and modules
+        make ARCH=x86_64 -j$(nproc) bzImage modules
+        
         echo "=== Build Statistics ==="
-        ccache --show-stats || true
+        ccache --show-stats
         ls -la arch/x86/boot/bzImage
 
     - name: Install modules and create package
       run: |
-        cd kernel-source
-        mkdir -p ../kernel-build/x86_64/{boot,lib/modules,usr/src}
+        mkdir -p kernel-build/x86_64/{boot,lib/modules,usr/src}
         
         # Copy kernel image
-        cp arch/x86/boot/bzImage ../kernel-build/x86_64/boot/vmlinuz-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
+        cp arch/x86/boot/bzImage kernel-build/x86_64/boot/vmlinuz-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
         
         # Install modules
-        make ARCH=x86_64 \
-             INSTALL_MOD_PATH=../kernel-build/x86_64 \
-             modules_install
+        make ARCH=x86_64 INSTALL_MOD_PATH=kernel-build/x86_64 modules_install
         
-        # Copy additional files
-        cp .config ../kernel-build/x86_64/boot/config-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
-        cp System.map ../kernel-build/x86_64/boot/System.map-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
+        # Copy configuration and system map
+        cp .config kernel-build/x86_64/boot/config-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
+        cp System.map kernel-build/x86_64/boot/System.map-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}
         
-        # Copy headers for DKMS modules
-        make ARCH=x86_64 \
-             INSTALL_HDR_PATH=../kernel-build/x86_64/usr \
-             headers_install
+        # Install headers for DKMS compatibility
+        make ARCH=x86_64 INSTALL_HDR_PATH=kernel-build/x86_64/usr headers_install
         
-        # Create kernel source symlink info
-        KERNEL_VERSION_DIR=$(ls ../kernel-build/x86_64/lib/modules/)
-        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > ../kernel-build/x86_64/lib/modules/$KERNEL_VERSION_DIR/source
-        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > ../kernel-build/x86_64/lib/modules/$KERNEL_VERSION_DIR/build
+        # Create module directory symlinks
+        KERNEL_VERSION_FULL=$(ls kernel-build/x86_64/lib/modules/)
+        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/source
+        echo "kernel-${{ env.KERNEL_VERSION }}-${{ env.KERNEL_NAME }}" > kernel-build/x86_64/lib/modules/$KERNEL_VERSION_FULL/build
 
-    - name: Generate package metadata
+    - name: Generate package metadata and installation script
       run: |
         cd kernel-build
         
-        # Create detailed build info
+        # Create comprehensive build information
         cat > x86_64/BUILD_INFO << EOF
         ================================
         XYZVoid Kernel Build Information
@@ -262,129 +260,194 @@ jobs:
         - Compiler: Clang/LLVM ${{ env.LLVM_VERSION }}
         - Build Date: ${{ env.BUILD_TIMESTAMP }}
         - Git Commit: ${{ env.KERNEL_FULL_COMMIT }}
+        - Target: x86_64-v3 (AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE)
         - Optimizations: -O3 -march=x86-64-v3 -mtune=generic
         - LTO: Thin LTO enabled
         - CFI: Control Flow Integrity enabled
-        - Security: Stack protection, FORTIFY_SOURCE
+        - Security: FORTIFY_SOURCE, Stack protection, Hardened usercopy
         
         Features:
         - ZSTD/LZ4 compression support
-        - Transparent huge pages
+        - ZSWAP with LZ4 compression (default on)
+        - Transparent huge pages (always on)
         - High-resolution timers
-        - Preemptive scheduling
-        - Enhanced security features
-        - x86_64-v3 instruction set optimization
+        - Preemptive voluntary scheduling
+        - Enhanced security and memory protection
+        - Modern x86_64 CPU optimizations
         
         Package Contents:
         - boot/: Kernel image, config, System.map
         - lib/modules/: Kernel modules
-        - usr/include/: Kernel headers
+        - usr/include/: Kernel headers for DKMS
         EOF
         
-        # Create installation script
+        # Create smart installation script
         cat > x86_64/install.sh << 'EOF'
         #!/bin/bash
         set -e
         
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         KERNEL_VERSION=$(ls "$SCRIPT_DIR/lib/modules/" | head -n1)
+        KERNEL_NAME="xyzvoid-kernel"
         
-        echo "Installing XYZVoid Kernel x86_64..."
+        echo "========================================"
+        echo "  XYZVoid Kernel Installation Script"
+        echo "========================================"
         echo "Kernel version: $KERNEL_VERSION"
+        echo
         
         # Check if running as root
         if [ "$EUID" -ne 0 ]; then
-            echo "Please run as root (use sudo)"
+            echo "❌ Error: Please run as root (use sudo)"
             exit 1
         fi
         
-        # Check architecture
+        # Check system compatibility
         if [ "$(uname -m)" != "x86_64" ]; then
-            echo "Error: This kernel is built for x86_64 architecture only"
-            echo "Your system architecture: $(uname -m)"
+            echo "❌ Error: This kernel is only compatible with x86_64 systems"
             exit 1
         fi
         
-        # Backup current kernel (optional)
-        read -p "Create backup of current kernel? [y/N]: " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            mkdir -p /boot/backup-$(date +%Y%m%d)
-            cp /boot/vmlinuz* /boot/backup-$(date +%Y%m%d)/ 2>/dev/null || true
-            cp /boot/initrd* /boot/backup-$(date +%Y%m%d)/ 2>/dev/null || true
-            echo "Backup created in /boot/backup-$(date +%Y%m%d)/"
+        # Check for x86_64-v3 support
+        if ! grep -q "avx2\|fma" /proc/cpuinfo; then
+            echo "⚠️  Warning: Your CPU may not support x86_64-v3 features"
+            echo "    This kernel is optimized for modern CPUs (2015+)"
+            read -p "Continue anyway? [y/N]: " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
         fi
+        
+        # Backup current kernel
+        echo "🔄 Creating backup of current kernel..."
+        BACKUP_DIR="/boot/backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$BACKUP_DIR"
+        cp /boot/vmlinuz* "$BACKUP_DIR/" 2>/dev/null || true
+        cp /boot/initrd* "$BACKUP_DIR/" 2>/dev/null || true
+        cp /boot/initramfs* "$BACKUP_DIR/" 2>/dev/null || true
+        echo "   Backup created: $BACKUP_DIR"
         
         # Install kernel files
-        echo "Installing kernel files..."
-        cp -r boot/* /boot/
+        echo "📦 Installing kernel files..."
+        cp -v boot/* /boot/
         cp -r lib/modules/* /lib/modules/
-        cp -r usr/include/* /usr/include/ 2>/dev/null || true
+        [ -d usr/include ] && cp -r usr/include/* /usr/include/ 2>/dev/null || true
         
         # Update initramfs
-        echo "Updating initramfs..."
+        echo "🔧 Updating initramfs..."
         if command -v update-initramfs >/dev/null 2>&1; then
+            echo "   Using update-initramfs (Debian/Ubuntu)"
             update-initramfs -c -k "$KERNEL_VERSION"
         elif command -v mkinitcpio >/dev/null 2>&1; then
+            echo "   Using mkinitcpio (Arch Linux)"
             mkinitcpio -k "$KERNEL_VERSION" -g "/boot/initramfs-$KERNEL_VERSION.img"
         elif command -v dracut >/dev/null 2>&1; then
+            echo "   Using dracut (Fedora/RHEL/openSUSE)"
             dracut "/boot/initramfs-$KERNEL_VERSION.img" "$KERNEL_VERSION"
         else
-            echo "Warning: No initramfs tool found. Manual initramfs creation may be required."
+            echo "⚠️  Warning: No initramfs tool found. You may need to create initramfs manually."
         fi
         
         # Update bootloader
-        echo "Updating bootloader..."
+        echo "🥾 Updating bootloader..."
         if command -v update-grub >/dev/null 2>&1; then
+            echo "   Using update-grub (Debian/Ubuntu)"
             update-grub
         elif command -v grub-mkconfig >/dev/null 2>&1; then
+            echo "   Using grub-mkconfig"
             grub-mkconfig -o /boot/grub/grub.cfg
         elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            echo "   Using grub2-mkconfig (Fedora/RHEL)"
             grub2-mkconfig -o /boot/grub2/grub.cfg
         else
-            echo "Warning: No GRUB found. Manual bootloader configuration may be required."
+            echo "⚠️  Warning: No GRUB found. Please update your bootloader manually."
         fi
         
-        echo ""
+        echo
         echo "✅ Installation complete!"
-        echo "📋 Installed kernel: $KERNEL_VERSION"
-        echo "🔄 Please reboot to use the new kernel."
-        echo ""
-        echo "💡 Recommended kernel parameters:"
+        echo
+        echo "🚀 Recommended kernel parameters:"
         echo "   mitigations=auto transparent_hugepage=madvise zswap.enabled=1"
+        echo
+        echo "🔄 Please reboot to use the new XYZVoid kernel."
+        echo "   Your previous kernel is backed up in: $BACKUP_DIR"
         EOF
         
         chmod +x x86_64/install.sh
+        
+        # Create uninstall script
+        cat > x86_64/uninstall.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        KERNEL_VERSION=$(ls "$SCRIPT_DIR/lib/modules/" | head -n1)
+        
+        echo "========================================"
+        echo "  XYZVoid Kernel Uninstall Script"
+        echo "========================================"
+        echo "Kernel version: $KERNEL_VERSION"
+        echo
+        
+        if [ "$EUID" -ne 0 ]; then
+            echo "❌ Error: Please run as root (use sudo)"
+            exit 1
+        fi
+        
+        read -p "Are you sure you want to uninstall XYZVoid kernel? [y/N]: " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Uninstall cancelled."
+            exit 0
+        fi
+        
+        echo "🗑️  Removing kernel files..."
+        rm -f /boot/*xyzvoid-kernel* /boot/*$KERNEL_VERSION*
+        rm -rf /lib/modules/$KERNEL_VERSION
+        
+        echo "🔧 Updating bootloader..."
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+            grub-mkconfig -o /boot/grub/grub.cfg  
+        elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg
+        fi
+        
+        echo "✅ XYZVoid kernel uninstalled successfully!"
+        EOF
+        
+        chmod +x x86_64/uninstall.sh
 
-    - name: Create optimized archive
+    - name: Create optimized archives
       run: |
         cd kernel-build
         
-        # Create compressed archive with best compression
-        echo "Creating ZSTD archive..."
+        # Create ZSTD compressed archive (best compression, modern)
+        echo "📦 Creating ZSTD archive..."
         tar --zstd -cf ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-x86_64-${{ env.KERNEL_DATE }}.tar.zst x86_64/
         
-        # Also create traditional gzip for compatibility
-        echo "Creating GZIP archive..."
+        # Create traditional gzip for compatibility
+        echo "📦 Creating gzip archive..."
         tar -czf ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-x86_64-${{ env.KERNEL_DATE }}.tar.gz x86_64/
         
         # Generate checksums
-        sha256sum *.tar.* > checksums-x86_64.sha256
+        sha256sum *.tar.* > SHA256SUMS
         
-        # Show archive info
         echo "=== Archive Information ==="
         ls -lah *.tar.*
-        echo ""
+        echo
         echo "=== Checksums ==="
-        cat checksums-x86_64.sha256
+        cat SHA256SUMS
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-x86_64-${{ env.KERNEL_DATE }}
+        name: xyzvoid-kernel-x86_64-${{ env.KERNEL_DATE }}
         path: |
           kernel-build/*.tar.*
-          kernel-build/checksums-*.sha256
+          kernel-build/SHA256SUMS
         retention-days: 30
         compression-level: 1
 
@@ -403,7 +466,7 @@ jobs:
           echo "RELEASE_TAG=v6.15.0-xyzvoid-$(date +'%Y%m%d')" >> $GITHUB_ENV
         fi
 
-    - name: Download all artifacts
+    - name: Download build artifacts
       uses: actions/download-artifact@v4
       with:
         path: release-artifacts
@@ -412,21 +475,17 @@ jobs:
       run: |
         mkdir -p release-files
         find release-artifacts -name "*.tar.*" -exec cp {} release-files/ \;
-        find release-artifacts -name "checksums-*.sha256" -exec cp {} release-files/ \;
-        
-        # Combine all checksums
-        cat release-files/checksums-*.sha256 > release-files/SHA256SUMS
-        rm release-files/checksums-*.sha256
+        find release-artifacts -name "SHA256SUMS" -exec cp {} release-files/ \;
         
         echo "=== Release Files ==="
         ls -la release-files/
 
-    - name: Generate comprehensive release notes
+    - name: Generate release notes
       run: |
         cat > RELEASE_NOTES.md << 'EOF'
         # 🚀 XYZVoid Kernel ${{ env.RELEASE_TAG }}
         
-        A high-performance, security-hardened Linux kernel based on the stable 6.15.y branch, optimized for x86_64 systems.
+        A high-performance, security-hardened Linux kernel optimized for modern x86_64 systems.
         
         ## 📋 Release Information
         
@@ -436,232 +495,138 @@ jobs:
         | **Maintainer** | ${{ env.MAINTAINER }} |
         | **Build Date** | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |
         | **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |
-        | **Architecture** | x86_64 only |
-        | **Target** | x86_64-v3 (modern CPUs) |
+        | **Architecture** | x86_64 (x86_64-v3 optimized) |
+        | **Target CPUs** | Intel Haswell+ (2013), AMD Excavator+ (2015) |
         
         ## ✨ Key Features
         
         ### 🔒 Security Enhancements
-        - **Control Flow Integrity (CFI)** - Prevents ROP/JOP attacks
-        - **Shadow Call Stack** - Additional return address protection  
-        - **Stack Protection** - Strong stack smashing protection
+        - **Control Flow Integrity (CFI)** - Advanced ROP/JOP attack prevention
         - **FORTIFY_SOURCE** - Enhanced buffer overflow detection
-        - **SLAB Randomization** - Randomized memory allocator
+        - **Hardened Usercopy** - Kernel/userspace copy protection
+        - **Stack Protection** - Strong stack smashing protection
+        - **Memory Initialization** - Zero-on-alloc and free-on-free
+        - **SLAB Randomization** - Randomized kernel memory allocator
         
         ### ⚡ Performance Optimizations
+        - **x86_64-v3 Target** - AVX2, FMA, BMI optimizations for modern CPUs
         - **Thin LTO** - Link-time optimization for better performance
-        - **-O3 Optimization** - Maximum compiler optimization
-        - **x86_64-v3 Target** - Modern CPU instruction support (AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE, XSAVE)
-        - **ZSTD/LZ4 Compression** - Faster compression algorithms
-        - **Transparent Huge Pages** - Improved memory management
-        - **Intel/AMD P-State** - Advanced CPU frequency scaling
+        - **-O3 Compilation** - Maximum compiler optimization
+        - **ZSWAP** - Compressed swap (LZ4, enabled by default)
+        - **Transparent Huge Pages** - Always enabled for better memory efficiency
+        - **High-Resolution Timers** - Precise timing for multimedia workloads
         
-        ### 🎯 Kernel Features
-        - **Preemptive Scheduling** - Better desktop responsiveness
-        - **High-Resolution Timers** - Precise timing for multimedia
-        - **Tickless Operation** - Reduced power consumption
-        - **ZRAM/ZSWAP Support** - Compressed memory and swap
+        ### 🎯 Kernel Configuration
+        - **Preemptive Voluntary** - Balanced responsiveness and throughput
+        - **Tickless Operation** - Reduced power consumption and latency
+        - **ZSTD/LZ4 Compression** - Fast compression throughout the kernel
+        - **Minimal Feature Set** - Audio, wireless, and non-essential drivers disabled
+        - **DKMS Support** - Kernel headers included for third-party modules
         
-        ## 📦 Available Downloads
+        ## 📦 Downloads
         
         ### x86_64 (Intel/AMD 64-bit)
-        - `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst` - ZSTD compressed (recommended)
-        - `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.gz` - GZIP compressed (compatibility)
+        - **ZSTD Archive** (Recommended): `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst`
+        - **GZIP Archive** (Compatibility): `xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.gz`
+        - **Checksums**: `SHA256SUMS`
         
-        ### Checksums
-        - `SHA256SUMS` - SHA256 checksums for all files
+        ## 🖥️ System Requirements
         
-        ### System Requirements
-        - **CPU**: x86_64 processor with x86_64-v3 support (Intel Haswell+ or AMD Excavator+)
-        - **RAM**: Minimum 2GB (4GB+ recommended)
-        - **Storage**: At least 500MB free space in /boot
+        ### Minimum Requirements
+        - **Architecture**: x86_64 (64-bit Intel/AMD)
+        - **CPU**: Any x86_64 processor
+        - **RAM**: 512MB minimum, 2GB+ recommended
+        - **Storage**: 100MB for kernel package
         
-        ## 🛠️ Installation Guide
+        ### Optimal Performance
+        - **CPU**: Intel Haswell (2013+) or AMD Excavator (2015+)
+        - **Features**: AVX2, FMA, BMI1/BMI2 support
+        - **RAM**: 4GB+ for best ZSWAP performance
         
-        ### Quick Installation (Automated)
+        ## 🛠️ Quick Installation
+        
         ```bash
-        # Download and extract the kernel package
+        # Download the kernel package
         wget https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst
-        tar --zstd -xf xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst
         
-        # Run the installation script
+        # Extract and install
+        tar --zstd -xf xyzvoid-kernel-6.15.y-x86_64-${{ env.KERNEL_DATE }}.tar.zst
         cd x86_64
         sudo ./install.sh
         
-        # Reboot to use the new kernel
+        # Reboot to new kernel
         sudo reboot
-        ```
-        
-        ### Manual Installation
-        
-        #### For Ubuntu/Debian:
-        ```bash
-        # Extract the package
-        tar --zstd -xf xyzvoid-kernel-*.tar.zst
-        cd x86_64
-        
-        # Install kernel files
-        sudo cp boot/* /boot/
-        sudo cp -r lib/modules/* /lib/modules/
-        
-        # Update initramfs
-        KERNEL_VERSION=$(ls lib/modules/)
-        sudo update-initramfs -c -k $KERNEL_VERSION
-        
-        # Update GRUB
-        sudo update-grub
-        sudo reboot
-        ```
-        
-        #### For Fedora/RHEL/CentOS:
-        ```bash
-        # Extract the package
-        tar --zstd -xf xyzvoid-kernel-*.tar.zst
-        cd x86_64
-        
-        # Install kernel files
-        sudo cp boot/* /boot/
-        sudo cp -r lib/modules/* /lib/modules/
-        
-        # Update initramfs
-        KERNEL_VERSION=$(ls lib/modules/)
-        sudo dracut /boot/initramfs-$KERNEL_VERSION.img $KERNEL_VERSION
-        
-        # Update GRUB
-        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-        sudo reboot
-        ```
-        
-        #### For Arch Linux:
-        ```bash
-        # Extract the package
-        tar --zstd -xf xyzvoid-kernel-*.tar.zst
-        cd x86_64
-        
-        # Install kernel files
-        sudo cp boot/* /boot/
-        sudo cp -r lib/modules/* /lib/modules/
-        
-        # Update initramfs
-        KERNEL_VERSION=$(ls lib/modules/)
-        sudo mkinitcpio -k $KERNEL_VERSION -g /boot/initramfs-$KERNEL_VERSION.img
-        
-        # Update bootloader (GRUB)
-        sudo grub-mkconfig -o /boot/grub/grub.cfg
-        sudo reboot
-        ```
-        
-        ### Recommended Kernel Parameters
-        Add these to your GRUB configuration for optimal performance:
-        ```
-        mitigations=auto
-        transparent_hugepage=madvise  
-        zswap.enabled=1
-        zswap.compressor=lz4
-        intel_pstate=active
-        amd_pstate=active
-        quiet splash
         ```
         
         ## 🔍 Verification
         
-        ### Verify Download Integrity
         ```bash
-        # Download checksums
+        # Verify download integrity
         wget https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/SHA256SUMS
-        
-        # Verify checksum
         sha256sum -c SHA256SUMS
+        
+        # Check kernel after reboot
+        uname -r  # Should show: 6.15.y-xyzvoid-kernel
+        
+        # Verify optimizations
+        zcat /proc/config.gz | grep -E "(LTO|CFI|ZSWAP)"
         ```
         
-        ### Verify Installation
-        ```bash
-        # Check kernel version after reboot
-        uname -r
-        # Should show: 6.15.y-xyzvoid-kernel
+        ## 🎛️ Recommended Kernel Parameters
         
-        # Check compiler and optimization level
-        cat /proc/version
-        
-        # Verify x86_64-v3 support
-        lscpu | grep -E "(avx|avx2|fma)"
-        
-        # Check security features
-        zcat /proc/config.gz | grep -E "(LTO|CFI|FORTIFY)"
+        Add to your bootloader configuration:
+        ```
+        mitigations=auto transparent_hugepage=madvise zswap.enabled=1 zswap.compressor=lz4 quiet splash
         ```
         
-        ## 🐛 Troubleshooting
+        ## 🆘 Support & Recovery
         
         ### Boot Issues
-        1. **Kernel panic**: Use previous kernel from GRUB menu
-        2. **CPU not supported**: Your CPU may not support x86_64-v3 instructions
-        3. **Missing modules**: Ensure initramfs was properly generated
-        4. **Graphics issues**: Add `nomodeset` to kernel parameters temporarily
+        1. Select previous kernel from GRUB menu
+        2. Boot from live USB if necessary
+        3. Use the included `uninstall.sh` script
         
-        ### CPU Compatibility Check
-        ```bash
-        # Check if your CPU supports x86_64-v3
-        /lib64/ld-linux-x86-64.so.2 --help | grep "x86-64-v3 (supported"
-        
-        # Alternative check
-        lscpu | grep -E "(avx|avx2|bmi1|bmi2|fma)"
-        ```
-        
-        ### Recovery
-        ```bash
-        # Boot from live USB/rescue mode
-        # Mount root filesystem
-        sudo mount /dev/sdXY /mnt
-        
-        # Chroot into system
-        sudo chroot /mnt
-        
-        # Remove problematic kernel
-        rm /boot/*xyzvoid-kernel*
-        rm -rf /lib/modules/*xyzvoid-kernel*
-        
-        # Update bootloader
-        update-grub  # or grub-mkconfig
-        ```
-        
-        ## 📞 Support
-        
+        ### Getting Help
         - **Issues**: [GitHub Issues](https://github.com/${{ github.repository }}/issues)
         - **Discussions**: [GitHub Discussions](https://github.com/${{ github.repository }}/discussions)
-        - **Security**: Report security issues privately to ${{ env.MAINTAINER }}
+        
+        ## ⚠️ Important Notes
+        
+        - **CPU Compatibility**: Optimized for x86_64-v3 (2013+ Intel, 2015+ AMD)
+        - **Backup**: Always keep your original kernel as backup
+        - **Testing**: Test in virtual machine first if possible
+        - **Production**: Consider carefully for production servers
         
         ## 📄 License
         
-        This kernel is distributed under the GNU General Public License v2.0, same as the Linux kernel.
+        GPL v2.0 - Same as Linux kernel
         
         ---
         
-        **⚠️ Important Notes:**
-        - This kernel requires x86_64-v3 compatible CPU (2013+ Intel/AMD)
-        - Always backup your system before installing a custom kernel
-        - Keep your previous kernel available for recovery
-        - Test thoroughly before using in production
-        
-        **Built with ❤️ using GitHub Actions and LLVM/Clang ${{ env.LLVM_VERSION }}**
+        **Built with modern tooling: Clang/LLVM ${{ env.LLVM_VERSION }}, Ubuntu 24.04, GitHub Actions**
         EOF
 
-    - name: Create Release
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ env.RELEASE_TAG }}
-        name: "🚀 XYZVoid Kernel ${{ env.RELEASE_TAG }} (x86_64)"
+        name: "🚀 XYZVoid Kernel ${{ env.RELEASE_TAG }}"
         body_path: RELEASE_NOTES.md
         files: release-files/*
         draft: false
         prerelease: false
         make_latest: true
-        generate_release_notes: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Update release statistics
+    - name: Build summary
       run: |
-        echo "::notice title=Release Created::XYZVoid Kernel ${{ env.RELEASE_TAG }} has been released successfully!"
-        echo "::notice title=Architecture::Built for x86_64 only (x86_64-v3 optimized)"
-        echo "::notice title=Compiler::Built with Clang/LLVM ${{ env.LLVM_VERSION }}"
-        echo "::notice title=Download::https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
+        echo "## 🎉 XYZVoid Kernel Build Complete!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Release** | ${{ env.RELEASE_TAG }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Architecture** | x86_64 only |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Compiler** | Clang/LLVM ${{ env.LLVM_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Optimizations** | x86_64-v3, -O3, Thin LTO, CFI |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Download** | [Release Page](https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}) |" >> $GITHUB_STEP_SUMMARY
