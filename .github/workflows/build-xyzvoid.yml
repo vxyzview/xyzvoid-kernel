@@ -1,65 +1,51 @@
-name: Build XYZVoid Kernel and Create Distribution Packages
+name: Build XYZVoid Kernel Package
 
 on:
   push:
     branches: [ linux-6.15.y ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ linux-6.15.y ]
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Release tag (e.g., xyzvoid-v6.15.1)'
-        required: true
-        type: string
-      prerelease:
-        description: 'Mark as prerelease'
+      kernel_config:
+        description: 'Kernel configuration (defconfig, allmodconfig, or custom)'
         required: false
-        type: boolean
-        default: false
+        default: 'defconfig'
+        type: choice
+        options:
+          - defconfig
+          - allmodconfig
+          - custom
+      architecture:
+        description: 'Target architecture'
+        required: false
+        default: 'x86_64'
+        type: choice
+        options:
+          - x86_64
+          - arm64
+          - arm
+          - i386
 
 env:
   KERNEL_VERSION: "6.15"
-  KERNEL_NAME: "xyzvoid"
-  ARCH: "x86_64"
+  KERNEL_NAME: "xyzvoid-kernel"
+  MAINTAINER: "vxyzview"
+  MAINTAINER_EMAIL: "vxyzview@example.com"
   JOBS: 4
-  MAINTAINER: "vxyzview <vxyzview@gmail.com>"
-  HOMEPAGE: "https://github.com/vxyzview/xyzvoid-kernel"
 
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    outputs:
-      kernel_version: ${{ steps.version.outputs.kernel_version }}
-      commit_sha: ${{ steps.version.outputs.commit_sha }}
-      build_date: ${{ steps.version.outputs.build_date }}
-      localversion: ${{ steps.version.outputs.localversion }}
-      full_version: ${{ steps.version.outputs.full_version }}
-      package_version: ${{ steps.version.outputs.package_version }}
     
     steps:
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 512
-        swap-size-mb: 1024
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-
-    - name: Checkout XYZVoid kernel source
+    - name: Checkout kernel source
       uses: actions/checkout@v4
       with:
-        repository: vxyzview/xyzvoid-kernel
         ref: linux-6.15.y
         fetch-depth: 0
 
-    - name: Install dependencies
+    - name: Set up build environment
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -73,937 +59,552 @@ jobs:
           kmod \
           cpio \
           rsync \
+          debhelper \
+          kernel-package \
+          fakeroot \
           wget \
           xz-utils \
-          git \
-          fakeroot \
-          kernel-package \
           dwarves \
-          debhelper \
           rpm \
-          rpmbuild \
-          alien
+          rpm-build \
+          rpmdevtools \
+          createrepo-c \
+          git
 
-    - name: Setup ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: kernel-${{ matrix.config }}
-
-    - name: Get XYZVoid kernel version info
-      id: version
+    - name: Configure build variables
       run: |
-        KERNEL_VERSION=$(make kernelversion)
-        COMMIT_SHA=$(git rev-parse --short HEAD)
-        BUILD_DATE=$(date -u +"%Y%m%d%H%M%S")
-        LOCALVERSION="-${{ env.KERNEL_NAME }}-${BUILD_DATE}-${COMMIT_SHA}"
-        PACKAGE_VERSION="${KERNEL_VERSION}.${BUILD_DATE}"
+        ARCH="${{ github.event.inputs.architecture || 'x86_64' }}"
+        CONFIG="${{ github.event.inputs.kernel_config || 'defconfig' }}"
+        BUILD_DATE=$(date +%Y%m%d)
         
-        echo "kernel_version=${KERNEL_VERSION}" >> $GITHUB_OUTPUT
-        echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
-        echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
-        echo "localversion=${LOCALVERSION}" >> $GITHUB_OUTPUT
-        echo "full_version=${KERNEL_VERSION}${LOCALVERSION}" >> $GITHUB_OUTPUT
-        echo "package_version=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
+        echo "TARGET_ARCH=$ARCH" >> $GITHUB_ENV
+        echo "KERNEL_CONFIG=$CONFIG" >> $GITHUB_ENV
+        echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+        echo "KERNEL_RELEASE=$KERNEL_VERSION-xyzvoid" >> $GITHUB_ENV
+        
+        # Set cross-compilation variables if needed
+        case $ARCH in
+          arm64)
+            echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+            echo "ARCH=arm64" >> $GITHUB_ENV
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            ;;
+          arm)
+            echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_ENV
+            echo "ARCH=arm" >> $GITHUB_ENV
+            sudo apt-get install -y gcc-arm-linux-gnueabihf
+            ;;
+          i386)
+            echo "ARCH=i386" >> $GITHUB_ENV
+            ;;
+          *)
+            echo "ARCH=x86_64" >> $GITHUB_ENV
+            ;;
+        esac
 
-    - name: Configure XYZVoid kernel
+    - name: Configure kernel
       run: |
-        export PATH="/usr/lib/ccache:$PATH"
-        
-        case "${{ matrix.config }}" in
-          xyzvoid-defconfig)
-            if [ -f arch/${{ env.ARCH }}/configs/xyzvoid_defconfig ]; then
-              make xyzvoid_defconfig
-            elif [ -f arch/${{ env.ARCH }}/configs/${{ env.KERNEL_NAME }}_defconfig ]; then
-              make ${{ env.KERNEL_NAME }}_defconfig
-            else
-              make defconfig
-              echo "Using standard defconfig - consider creating arch/${{ env.ARCH }}/configs/xyzvoid_defconfig"
-            fi
+        case $KERNEL_CONFIG in
+          defconfig)
+            make defconfig
             ;;
           allmodconfig)
             make allmodconfig
-            scripts/config --disable CONFIG_DEBUG_INFO_BTF
-            scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
-            scripts/config --disable CONFIG_GDB_SCRIPTS
+            ;;
+          custom)
+            # Use existing .config if present, otherwise defconfig
+            if [ ! -f .config ]; then
+              make defconfig
+            fi
             ;;
         esac
         
-        echo 'CONFIG_LOCALVERSION="${{ steps.version.outputs.localversion }}"' >> .config
-        echo 'CONFIG_LOCALVERSION_AUTO=n' >> .config
-        
-        scripts/config --disable CONFIG_DEBUG_INFO
-        scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
-        
-        make olddefconfig
+        # Set custom kernel name
+        sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-xyzvoid\"/" .config || echo 'CONFIG_LOCALVERSION="-xyzvoid"' >> .config
 
-    - name: Build XYZVoid kernel
+    - name: Build kernel
       run: |
-        export PATH="/usr/lib/ccache:$PATH"
-        export CCACHE_DIR=$HOME/.ccache
+        echo "Building XYZVoid kernel with $JOBS parallel jobs..."
+        make -j$JOBS LOCALVERSION=-xyzvoid
         
-        make -j${{ env.JOBS }} ARCH=${{ env.ARCH }}
-        make -j${{ env.JOBS }} modules ARCH=${{ env.ARCH }}
-        
-        make INSTALL_MOD_PATH=./modules_install modules_install
-        make INSTALL_HDR_PATH=./headers_install headers_install
+        # Build modules
+        make -j$JOBS modules
 
-    - name: Create base kernel package structure
+    - name: Create base package structure
       run: |
-        mkdir -p kernel-build/{boot,lib/modules,usr/src}
+        mkdir -p package-base/boot
+        mkdir -p package-base/lib/modules
+        mkdir -p package-base/usr/src
+        mkdir -p package-base/usr/include
         
         # Copy kernel image
-        cp arch/${{ env.ARCH }}/boot/bzImage kernel-build/boot/vmlinuz-${{ steps.version.outputs.full_version }}-${{ matrix.config }}
-        cp System.map kernel-build/boot/System.map-${{ steps.version.outputs.full_version }}-${{ matrix.config }}
-        cp .config kernel-build/boot/config-${{ steps.version.outputs.full_version }}-${{ matrix.config }}
+        if [ -f arch/$ARCH/boot/bzImage ]; then
+          cp arch/$ARCH/boot/bzImage package-base/boot/vmlinuz-$KERNEL_RELEASE
+        elif [ -f arch/$ARCH/boot/Image ]; then
+          cp arch/$ARCH/boot/Image package-base/boot/vmlinuz-$KERNEL_RELEASE
+        elif [ -f arch/$ARCH/boot/zImage ]; then
+          cp arch/$ARCH/boot/zImage package-base/boot/vmlinuz-$KERNEL_RELEASE
+        fi
         
-        # Copy modules
-        cp -r modules_install/* kernel-build/
+        # Copy System.map and config
+        cp System.map package-base/boot/System.map-$KERNEL_RELEASE
+        cp .config package-base/boot/config-$KERNEL_RELEASE
         
-        # Copy headers
-        cp -r headers_install/* kernel-build/usr/
+        # Install modules
+        make INSTALL_MOD_PATH=package-base modules_install
+        
+        # Copy kernel headers
+        make INSTALL_HDR_PATH=package-base/usr headers_install
 
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ steps.version.outputs.commit_sha }}
-        path: |
-          kernel-build/
-          .config
-        retention-days: 30
-
-  package-debian:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    steps:
-    - name: Download kernel build
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ needs.build-kernel.outputs.commit_sha }}
-
-    - name: Install Debian packaging tools
+    - name: Build Debian package
       run: |
-        sudo apt-get update
-        sudo apt-get install -y debhelper dh-make devscripts
-
-    - name: Create Debian package structure
-      run: |
-        PACKAGE_NAME="xyzvoid-linux-${{ matrix.config }}"
-        VERSION="${{ needs.build-kernel.outputs.package_version }}"
+        cp -r package-base debian-package
+        mkdir -p debian-package/DEBIAN
         
-        mkdir -p ${PACKAGE_NAME}-${VERSION}/DEBIAN
-        mkdir -p ${PACKAGE_NAME}-${VERSION}/boot
-        mkdir -p ${PACKAGE_NAME}-${VERSION}/lib
-        mkdir -p ${PACKAGE_NAME}-${VERSION}/usr
-        
-        # Copy kernel files
-        cp -r kernel-build/* ${PACKAGE_NAME}-${VERSION}/
-        
-        # Create control file
-        cat > ${PACKAGE_NAME}-${VERSION}/DEBIAN/control << EOF
-        Package: ${PACKAGE_NAME}
-        Version: ${VERSION}
-        Section: kernel
-        Priority: optional
-        Architecture: amd64
-        Maintainer: ${{ env.MAINTAINER }}
-        Homepage: ${{ env.HOMEPAGE }}
-        Description: XYZVoid Linux Kernel (${{ matrix.config }})
-         XYZVoid is a custom Linux kernel built for enhanced performance and stability.
-         This package contains the kernel image, modules, and headers for the
-         ${{ matrix.config }} configuration.
+        cat > debian-package/DEBIAN/control << EOF
+        Package: $KERNEL_NAME
+        Version: $KERNEL_VERSION-xyzvoid-$BUILD_DATE
+        Architecture: $TARGET_ARCH
+        Maintainer: $MAINTAINER <$MAINTAINER_EMAIL>
+        Description: XYZVoid Custom Linux Kernel $KERNEL_VERSION
+         Custom Linux kernel built from linux-$KERNEL_VERSION.y branch
+         Built by $MAINTAINER on $BUILD_DATE
+         Configuration: $KERNEL_CONFIG
          .
-         Features:
-          - Custom optimizations for better performance
-          - Enhanced hardware compatibility
-          - Stability improvements and bug fixes
-          - Regular updates from upstream stable kernel
-        Depends: kmod, initramfs-tools | linux-initramfs-tool
-        Suggests: grub-pc | grub-efi-amd64 | extlinux
+         This kernel includes custom patches and optimizations
+         for enhanced performance and compatibility.
         EOF
         
-        # Create postinst script
-        cat > ${PACKAGE_NAME}-${VERSION}/DEBIAN/postinst << 'EOF'
+        cat > debian-package/DEBIAN/postinst << 'EOF'
         #!/bin/bash
         set -e
         
-        if [ "$1" = "configure" ]; then
-            # Update initramfs
-            if command -v update-initramfs >/dev/null 2>&1; then
-                update-initramfs -c -k $(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-            fi
-            
-            # Update GRUB
-            if command -v update-grub >/dev/null 2>&1; then
-                update-grub
-            fi
-            
-            echo "XYZVoid kernel installed successfully!"
-            echo "Please reboot to use the new kernel."
+        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
+        
+        # Update initramfs if update-initramfs is available
+        if command -v update-initramfs >/dev/null 2>&1; then
+          update-initramfs -c -k $KERNEL_VERSION || true
         fi
+        
+        # Update GRUB if available
+        if command -v update-grub >/dev/null 2>&1; then
+          update-grub || true
+        fi
+        
+        echo "XYZVoid kernel $KERNEL_VERSION installed successfully"
         EOF
         
-        # Create prerm script
-        cat > ${PACKAGE_NAME}-${VERSION}/DEBIAN/prerm << 'EOF'
+        cat > debian-package/DEBIAN/prerm << 'EOF'
         #!/bin/bash
         set -e
         
-        if [ "$1" = "remove" ]; then
-            KERNEL_VERSION=$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-            
-            # Remove initramfs
-            if command -v update-initramfs >/dev/null 2>&1; then
-                update-initramfs -d -k $KERNEL_VERSION || true
-            fi
-            
-            # Update GRUB
-            if command -v update-grub >/dev/null 2>&1; then
-                update-grub || true
-            fi
+        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
+        
+        # Remove initramfs
+        if command -v update-initramfs >/dev/null 2>&1; then
+          update-initramfs -d -k $KERNEL_VERSION || true
         fi
         EOF
         
-        chmod 755 ${PACKAGE_NAME}-${VERSION}/DEBIAN/postinst
-        chmod 755 ${PACKAGE_NAME}-${VERSION}/DEBIAN/prerm
+        chmod +x debian-package/DEBIAN/postinst
+        chmod +x debian-package/DEBIAN/prerm
         
-        # Calculate installed size
-        INSTALLED_SIZE=$(du -sk ${PACKAGE_NAME}-${VERSION} | cut -f1)
-        echo "Installed-Size: ${INSTALLED_SIZE}" >> ${PACKAGE_NAME}-${VERSION}/DEBIAN/control
-        
-        # Build package
-        dpkg-deb --build ${PACKAGE_NAME}-${VERSION}
+        dpkg-deb --build debian-package $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
 
-    - name: Upload Debian package
-      uses: actions/upload-artifact@v4
-      with:
-        name: debian-package-${{ matrix.config }}
-        path: "*.deb"
-
-  package-fedora:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    steps:
-    - name: Download kernel build
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ needs.build-kernel.outputs.commit_sha }}
-
-    - name: Install RPM packaging tools
+    - name: Build RPM package (Fedora)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y rpm rpmbuild
-
-    - name: Create RPM package structure
-      run: |
-        PACKAGE_NAME="xyzvoid-linux-${{ matrix.config }}"
-        VERSION="${{ needs.build-kernel.outputs.package_version }}"
-        
         mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-        mkdir -p build-root/{boot,lib,usr}
         
-        # Copy kernel files
-        cp -r kernel-build/* build-root/
+        # Create source tarball
+        tar -czf ~/rpmbuild/SOURCES/$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.tar.gz -C package-base .
         
-        # Create tarball
-        tar -czf ~/rpmbuild/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz -C build-root .
+        cat > ~/rpmbuild/SPECS/$KERNEL_NAME.spec << EOF
+        Name:           $KERNEL_NAME
+        Version:        $KERNEL_VERSION
+        Release:        xyzvoid.$BUILD_DATE%{?dist}
+        Summary:        XYZVoid Custom Linux Kernel
         
-        # Create spec file
-        cat > ~/rpmbuild/SPECS/${PACKAGE_NAME}.spec << EOF
-        Name:           ${PACKAGE_NAME}
-        Version:        ${VERSION}
-        Release:        1%{?dist}
-        Summary:        XYZVoid Linux Kernel (${{ matrix.config }})
         License:        GPLv2
-        URL:            ${{ env.HOMEPAGE }}
-        Source0:        %{name}-%{version}.tar.gz
-        BuildArch:      x86_64
+        URL:            https://github.com/$MAINTAINER/$KERNEL_NAME
+        Source0:        %{name}-%{version}-xyzvoid.tar.gz
         
-        Requires:       kmod
-        Requires:       dracut
-        Suggests:       grub2
+        BuildArch:      $TARGET_ARCH
+        Packager:       $MAINTAINER <$MAINTAINER_EMAIL>
         
         %description
-        XYZVoid is a custom Linux kernel built for enhanced performance and stability.
-        This package contains the kernel image, modules, and headers for the
-        ${{ matrix.config }} configuration.
+        XYZVoid Custom Linux Kernel $KERNEL_VERSION built from linux-$KERNEL_VERSION.y branch.
+        This kernel includes custom patches and optimizations for enhanced performance
+        and compatibility. Built by $MAINTAINER on $BUILD_DATE.
         
-        Features:
-        - Custom optimizations for better performance
-        - Enhanced hardware compatibility  
-        - Stability improvements and bug fixes
-        - Regular updates from upstream stable kernel
+        Configuration used: $KERNEL_CONFIG
         
         %prep
-        %setup -q -c
+        %setup -q -n .
         
         %build
-        # Nothing to build
+        # Nothing to build, kernel already compiled
         
         %install
-        mkdir -p %{buildroot}
         cp -r * %{buildroot}/
         
         %post
+        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
+        
+        # Update initramfs
         if command -v dracut >/dev/null 2>&1; then
-            dracut -f /boot/initramfs-\$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//').img \$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
+          dracut --force /boot/initramfs-\$KERNEL_VERSION.img \$KERNEL_VERSION || true
         fi
         
+        # Update GRUB
         if command -v grub2-mkconfig >/dev/null 2>&1; then
-            grub2-mkconfig -o /boot/grub2/grub.cfg
+          grub2-mkconfig -o /boot/grub2/grub.cfg || true
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+          grub-mkconfig -o /boot/grub/grub.cfg || true
         fi
         
-        echo "XYZVoid kernel installed successfully!"
-        echo "Please reboot to use the new kernel."
+        echo "XYZVoid kernel \$KERNEL_VERSION installed successfully"
         
         %preun
-        KERNEL_VERSION=\$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-        rm -f /boot/initramfs-\${KERNEL_VERSION}.img || true
+        KERNEL_VERSION="$KERNEL_VERSION-xyzvoid"
         
-        if command -v grub2-mkconfig >/dev/null 2>&1; then
-            grub2-mkconfig -o /boot/grub2/grub.cfg || true
-        fi
+        # Remove initramfs
+        rm -f /boot/initramfs-\$KERNEL_VERSION.img || true
         
         %files
         /boot/*
-        /lib/*
-        /usr/*
+        /lib/modules/*
+        /usr/include/*
         
         %changelog
-        * $(date +'%a %b %d %Y') ${{ env.MAINTAINER }} - ${VERSION}-1
-        - XYZVoid kernel build from commit ${{ needs.build-kernel.outputs.commit_sha }}
+        * $(date +'%a %b %d %Y') $MAINTAINER <$MAINTAINER_EMAIL> - $KERNEL_VERSION-xyzvoid.$BUILD_DATE
+        - Built XYZVoid kernel $KERNEL_VERSION from linux-$KERNEL_VERSION.y branch
+        - Configuration: $KERNEL_CONFIG
+        - Architecture: $TARGET_ARCH
+        - Custom patches and optimizations applied
+        - Enhanced performance and compatibility improvements
         EOF
         
-        # Build RPM
-        rpmbuild -ba ~/rpmbuild/SPECS/${PACKAGE_NAME}.spec
-        
-        # Copy built RPM
-        cp ~/rpmbuild/RPMS/x86_64/*.rpm .
+        rpmbuild -bb ~/rpmbuild/SPECS/$KERNEL_NAME.spec
+        cp ~/rpmbuild/RPMS/$TARGET_ARCH/$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE*.rpm .
 
-    - name: Upload Fedora package
-      uses: actions/upload-artifact@v4
-      with:
-        name: fedora-package-${{ matrix.config }}
-        path: "*.rpm"
-
-  package-archlinux:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    steps:
-    - name: Download kernel build
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ needs.build-kernel.outputs.commit_sha }}
-
-    - name: Install Arch packaging tools
+    - name: Build Arch Linux package
       run: |
-        sudo apt-get update
-        sudo apt-get install -y zstd
-
-    - name: Create Arch package structure
-      run: |
-        PACKAGE_NAME="xyzvoid-linux-${{ matrix.config }}"
-        VERSION="${{ needs.build-kernel.outputs.package_version }}"
+        mkdir -p arch-package
+        cp -r package-base/* arch-package/
         
-        mkdir -p pkg-root
-        cp -r kernel-build/* pkg-root/
+        cat > PKGBUILD << EOF
+        # Maintainer: $MAINTAINER <$MAINTAINER_EMAIL>
         
-        # Create .PKGINFO
-        cat > .PKGINFO << EOF
-        pkgname = ${PACKAGE_NAME}
-        pkgbase = ${PACKAGE_NAME}
-        pkgver = ${VERSION}-1
-        pkgdesc = XYZVoid Linux Kernel (${{ matrix.config }})
-        url = ${{ env.HOMEPAGE }}
-        builddate = $(date +%s)
-        packager = ${{ env.MAINTAINER }}
-        size = $(du -sb pkg-root | cut -f1)
-        arch = x86_64
-        license = GPL2
-        depend = kmod
-        depend = mkinitcpio
-        optdepend = grub: for GRUB bootloader support
+        pkgname=$KERNEL_NAME
+        pkgver=$KERNEL_VERSION.xyzvoid.$BUILD_DATE
+        pkgrel=1
+        pkgdesc="XYZVoid Custom Linux Kernel $KERNEL_VERSION"
+        arch=('$TARGET_ARCH')
+        url="https://github.com/$MAINTAINER/$KERNEL_NAME"
+        license=('GPL2')
+        provides=('linux')
+        conflicts=('linux')
+        backup=('etc/mkinitcpio.d/$KERNEL_NAME.preset')
+        
+        package() {
+          cd "\$srcdir"
+          
+          # Install kernel files
+          install -Dm644 ../arch-package/boot/vmlinuz-$KERNEL_RELEASE "\$pkgdir/boot/vmlinuz-$KERNEL_NAME"
+          install -Dm644 ../arch-package/boot/System.map-$KERNEL_RELEASE "\$pkgdir/boot/System.map-$KERNEL_NAME"
+          install -Dm644 ../arch-package/boot/config-$KERNEL_RELEASE "\$pkgdir/boot/config-$KERNEL_NAME"
+          
+          # Install modules
+          cp -r ../arch-package/lib "\$pkgdir/"
+          
+          # Install headers
+          cp -r ../arch-package/usr "\$pkgdir/"
+          
+          # Create mkinitcpio preset
+          install -Dm644 /dev/stdin "\$pkgdir/etc/mkinitcpio.d/$KERNEL_NAME.preset" << PRESET
+        # mkinitcpio preset file for $KERNEL_NAME
+        
+        ALL_config="/etc/mkinitcpio.conf"
+        ALL_kver="$KERNEL_RELEASE"
+        
+        PRESETS=('default' 'fallback')
+        
+        #default_config="/etc/mkinitcpio.conf"
+        default_image="/boot/initramfs-$KERNEL_NAME.img"
+        #default_options=""
+        
+        #fallback_config="/etc/mkinitcpio.conf"
+        fallback_image="/boot/initramfs-$KERNEL_NAME-fallback.img"
+        fallback_options="-S autodetect"
+        PRESET
+        }
         EOF
         
-        # Create .INSTALL script
-        cat > .INSTALL << 'EOF'
+        # Create package
+        mkdir -p pkg src
+        fakeroot -- bash -c '
+          source PKGBUILD
+          package
+          cd pkg
+          tar -czf ../$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz *
+        '
+
+    - name: Build Void Linux package
+      run: |
+        mkdir -p void-package/destdir
+        cp -r package-base/* void-package/destdir/
+        
+        cat > void-package/template << EOF
+        # Template file for '$KERNEL_NAME'
+        pkgname=$KERNEL_NAME
+        version=$KERNEL_VERSION.xyzvoid.$BUILD_DATE
+        revision=1
+        archs="$TARGET_ARCH"
+        wrksrc="\${pkgname}-\${version}"
+        build_style=meta
+        short_desc="XYZVoid Custom Linux Kernel $KERNEL_VERSION"
+        maintainer="$MAINTAINER <$MAINTAINER_EMAIL>"
+        license="GPL-2.0-only"
+        homepage="https://github.com/$MAINTAINER/$KERNEL_NAME"
+        
+        provides="linux-\${version}_\${revision}"
+        conflicts="linux"
+        
+        do_install() {
+          # Install kernel files
+          vinstall destdir/boot/vmlinuz-$KERNEL_RELEASE 644 boot vmlinuz-$KERNEL_NAME
+          vinstall destdir/boot/System.map-$KERNEL_RELEASE 644 boot System.map-$KERNEL_NAME
+          vinstall destdir/boot/config-$KERNEL_RELEASE 644 boot config-$KERNEL_NAME
+          
+          # Install modules
+          vcopy destdir/lib usr/
+          
+          # Install headers
+          vcopy destdir/usr/include usr/
+        }
+        
         post_install() {
-            KERNEL_VERSION=$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-            
-            echo "Generating initramfs..."
-            if command -v mkinitcpio >/dev/null 2>&1; then
-                mkinitcpio -k $KERNEL_VERSION -g /boot/initramfs-$KERNEL_VERSION.img
-            fi
-            
-            echo "Updating bootloader..."
-            if command -v grub-mkconfig >/dev/null 2>&1; then
-                grub-mkconfig -o /boot/grub/grub.cfg
-            fi
-            
-            echo "XYZVoid kernel installed successfully!"
-            echo "Please reboot to use the new kernel."
+          # Generate initramfs
+          if command -v dracut >/dev/null 2>&1; then
+            dracut --force /boot/initramfs-$KERNEL_NAME.img $KERNEL_RELEASE || true
+          fi
+          
+          # Update bootloader
+          if command -v update-grub >/dev/null 2>&1; then
+            update-grub || true
+          fi
+          
+          echo "XYZVoid kernel $KERNEL_RELEASE installed successfully"
         }
         
         pre_remove() {
-            KERNEL_VERSION=$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-            rm -f /boot/initramfs-$KERNEL_VERSION.img || true
-            
-            if command -v grub-mkconfig >/dev/null 2>&1; then
-                grub-mkconfig -o /boot/grub/grub.cfg || true
-            fi
+          # Remove initramfs
+          rm -f /boot/initramfs-$KERNEL_NAME.img || true
         }
         EOF
         
-        # Create .MTREE
-        cd pkg-root
-        find . -type f -exec sha256sum {} \; | sed 's|\./||' > ../.MTREE
-        cd ..
-        
-        # Create package
-        tar -cf - .PKGINFO .INSTALL .MTREE -C pkg-root . | zstd -19 > ${PACKAGE_NAME}-${VERSION}-1-x86_64.pkg.tar.zst
+        # Create xbps package
+        cd void-package
+        tar -czf ../$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps destdir template
 
-    - name: Upload Arch package
-      uses: actions/upload-artifact@v4
-      with:
-        name: archlinux-package-${{ matrix.config }}
-        path: "*.pkg.tar.zst"
-
-  package-voidlinux:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    steps:
-    - name: Download kernel build
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ needs.build-kernel.outputs.commit_sha }}
-
-    - name: Install Void packaging tools
+    - name: Generate changelog
       run: |
-        sudo apt-get update
-        sudo apt-get install -y xz-utils zstd
-
-    - name: Create Void package structure
-      run: |
-        PACKAGE_NAME="xyzvoid-linux-${{ matrix.config }}"
-        VERSION="${{ needs.build-kernel.outputs.package_version }}"
+        # Get commit messages since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
         
-        mkdir -p pkg-void/{usr/share/xbps/repodb,var/db/xbps/keys}
-        cp -r kernel-build/* pkg-void/
-        
-        # Create INSTALL script
-        cat > INSTALL << 'EOF'
-        #!/bin/bash
-        
-        case "$1" in
-        post)
-            KERNEL_VERSION=$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-            
-            echo "Generating initramfs..."
-            if command -v dracut >/dev/null 2>&1; then
-                dracut -f /boot/initramfs-${KERNEL_VERSION}.img ${KERNEL_VERSION}
-            fi
-            
-            echo "Updating bootloader..."
-            if command -v grub-mkconfig >/dev/null 2>&1; then
-                grub-mkconfig -o /boot/grub/grub.cfg
-            fi
-            
-            echo "XYZVoid kernel installed successfully!"
-            echo "Please reboot to use the new kernel."
-            ;;
-        pre)
-            if [ "$2" = "REMOVE" ]; then
-                KERNEL_VERSION=$(basename /boot/vmlinuz-* | sed 's/vmlinuz-//')
-                rm -f /boot/initramfs-${KERNEL_VERSION}.img || true
-                
-                if command -v grub-mkconfig >/dev/null 2>&1; then
-                    grub-mkconfig -o /boot/grub/grub.cfg || true
-                fi
-            fi
-            ;;
-        esac
-        EOF
-        
-        chmod +x INSTALL
-        
-        # Create files list
-        find pkg-void -type f | sed 's|^pkg-void||' > files
-        
-        # Create props.plist
-        cat > props.plist << EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>pkgname</key>
-            <string>${PACKAGE_NAME}</string>
-            <key>version</key>
-            <string>${VERSION}_1</string>
-            <key>architecture</key>
-            <string>x86_64</string>
-            <key>maintainer</key>
-            <string>${{ env.MAINTAINER }}</string>
-            <key>homepage</key>
-            <string>${{ env.HOMEPAGE }}</string>
-            <key>license</key>
-            <string>GPL-2.0-only</string>
-            <key>short_desc</key>
-            <string>XYZVoid Linux Kernel (${{ matrix.config }})</string>
-            <key>long_desc</key>
-            <string>XYZVoid is a custom Linux kernel built for enhanced performance and stability. This package contains the kernel image, modules, and headers for the ${{ matrix.config }} configuration.</string>
-            <key>installed_size</key>
-            <integer>$(du -sb pkg-void | cut -f1)</integer>
-            <key>run_depends</key>
-            <array>
-                <string>kmod</string>
-                <string>dracut</string>
-            </array>
-        </dict>
-        </plist>
-        EOF
-        
-        # Create package
-        tar -Jcf ${PACKAGE_NAME}-${VERSION}_1.x86_64.xbps -C pkg-void . --transform 's,^,/,' props.plist files INSTALL
-
-    - name: Upload Void package
-      uses: actions/upload-artifact@v4
-      with:
-        name: voidlinux-package-${{ matrix.config }}
-        path: "*.xbps"
-
-  package-gentoo:
-    needs: build-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        config: [xyzvoid-defconfig, allmodconfig]
-    
-    steps:
-    - name: Download kernel build
-      uses: actions/download-artifact@v4
-      with:
-        name: kernel-build-${{ matrix.config }}-${{ needs.build-kernel.outputs.commit_sha }}
-
-    - name: Create Gentoo ebuild and binary package
-      run: |
-        PACKAGE_NAME="xyzvoid-linux-${{ matrix.config }}"
-        VERSION="${{ needs.build-kernel.outputs.package_version }}"
-        
-        # Create portage structure
-        mkdir -p gentoo-pkg/sys-kernel/${PACKAGE_NAME}
-        mkdir -p binary-pkg
-        
-        # Create ebuild
-        cat > gentoo-pkg/sys-kernel/${PACKAGE_NAME}/${PACKAGE_NAME}-${VERSION}.ebuild << 'EOF'
-        # Copyright 2024 Gentoo Authors
-        # Distributed under the terms of the GNU General Public License v2
-        
-        EAPI=8
-        
-        DESCRIPTION="XYZVoid Linux Kernel (${{ matrix.config }})"
-        HOMEPAGE="${{ env.HOMEPAGE }}"
-        
-        LICENSE="GPL-2"
-        SLOT="0"
-        KEYWORDS="~amd64"
-        
-        RDEPEND="
-            sys-apps/kmod
-            sys-kernel/dracut
-        "
-        
-        S="${WORKDIR}"
-        
-        src_install() {
-            dodir /boot /lib /usr
-            cp -r "${S}"/boot/* "${ED}"/boot/ || die
-            cp -r "${S}"/lib/* "${ED}"/lib/ || die
-            cp -r "${S}"/usr/* "${ED}"/usr/ || die
-        }
-        
-        pkg_postinst() {
-            KERNEL_VERSION=$(basename "${ROOT}"/boot/vmlinuz-* | sed 's/vmlinuz-//')
-            
-            einfo "Generating initramfs..."
-            if command -v dracut >/dev/null 2>&1; then
-                dracut -f "${ROOT}"/boot/initramfs-${KERNEL_VERSION}.img ${KERNEL_VERSION}
-            fi
-            
-            einfo "Updating bootloader..."
-            if command -v grub-mkconfig >/dev/null 2>&1; then
-                grub-mkconfig -o "${ROOT}"/boot/grub/grub.cfg
-            fi
-            
-            einfo "XYZVoid kernel installed successfully!"
-            einfo "Please reboot to use the new kernel."
-        }
-        
-        pkg_prerm() {
-            KERNEL_VERSION=$(basename "${ROOT}"/boot/vmlinuz-* | sed 's/vmlinuz-//')
-            rm -f "${ROOT}"/boot/initramfs-${KERNEL_VERSION}.img || true
-            
-            if command -v grub-mkconfig >/dev/null 2>&1; then
-                grub-mkconfig -o "${ROOT}"/boot/grub/grub.cfg || true
-            fi
-        }
-        EOF
-        
-        # Create metadata
-        cat > gentoo-pkg/sys-kernel/${PACKAGE_NAME}/metadata.xml << EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE pkgmetadata SYSTEM "http://www.gentoo.org/dtd/metadata.dtd">
-        <pkgmetadata>
-            <maintainer type="person">
-                <email>vxyzview@gmail.com</email>
-                <name>vxyzview</name>
-            </maintainer>
-            <longdescription>
-                XYZVoid is a custom Linux kernel built for enhanced performance and stability.
-                This package contains the kernel image, modules, and headers for the
-                ${{ matrix.config }} configuration.
-            </longdescription>
-            <upstream>
-                <remote-id type="github">vxyzview/xyzvoid-kernel</remote-id>
-            </upstream>
-        </pkgmetadata>
-        EOF
-        
-        # Create Manifest
-        echo "DIST ${PACKAGE_NAME}-${VERSION}.tar.xz $(stat -c%s kernel-build | head -1) SHA256 $(find kernel-build -type f -exec sha256sum {} \; | sha256sum | cut -d' ' -f1)" > gentoo-pkg/sys-kernel/${PACKAGE_NAME}/Manifest
-        
-        # Create binary package structure
-        mkdir -p binary-pkg/{boot,lib,usr,var/db/pkg/sys-kernel/${PACKAGE_NAME}-${VERSION}}
-        cp -r kernel-build/* binary-pkg/
-        
-        # Create package metadata
-        cat > binary-pkg/var/db/pkg/sys-kernel/${PACKAGE_NAME}-${VERSION}/CATEGORY << EOF
-        sys-kernel
-        EOF
-        
-        cat > binary-pkg/var/db/pkg/sys-kernel/${PACKAGE_NAME}-${VERSION}/PF << EOF
-        ${PACKAGE_NAME}-${VERSION}
-        EOF
-        
-        # Create tbz2 package
-        tar -jcf ${PACKAGE_NAME}-${VERSION}.tbz2 -C binary-pkg .
-        
-        # Create portage tree archive
-        tar -jcf ${PACKAGE_NAME}-portage-${VERSION}.tar.bz2 -C gentoo-pkg .
-
-    - name: Upload Gentoo packages
-      uses: actions/upload-artifact@v4
-      with:
-        name: gentoo-package-${{ matrix.config }}
-        path: |
-          *.tbz2
-          *.tar.bz2
-
-  generate-changelog:
-    runs-on: ubuntu-latest
-    outputs:
-      changelog: ${{ steps.changelog.outputs.changelog }}
-      version: ${{ steps.version.outputs.version }}
-      
-    steps:
-    - name: Checkout XYZVoid kernel
-      uses: actions/checkout@v4
-      with:
-        repository: vxyzview/xyzvoid-kernel
-        ref: linux-6.15.y
-        fetch-depth: 0
-
-    - name: Get version info
-      id: version
-      run: |
-        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-          VERSION="${{ github.event.inputs.release_tag }}"
-        elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-          VERSION="${{ github.ref_name }}"
+        if [ -n "$LAST_TAG" ]; then
+          COMMITS=$(git log --oneline --no-merges $LAST_TAG..HEAD | head -20)
         else
-          KERNEL_VERSION=$(make kernelversion)
-          COMMIT_SHA=$(git rev-parse --short HEAD)
-          VERSION="xyzvoid-v${KERNEL_VERSION}-${COMMIT_SHA}"
+          COMMITS=$(git log --oneline --no-merges -10)
         fi
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-
-    - name: Generate XYZVoid changelog
-      id: changelog
-      run: |
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~50")
-        
-        echo "Generating XYZVoid changelog from ${LAST_TAG} to HEAD..."
         
         cat > CHANGELOG.md << EOF
-        # XYZVoid Kernel Release ${{ steps.version.outputs.version }}
+        # XYZVoid Kernel $KERNEL_VERSION Release
         
-        **Release Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-        **Kernel Version:** $(make kernelversion)
-        **Commit Range:** ${LAST_TAG}..HEAD
-        **Repository:** [vxyzview/xyzvoid-kernel](https://github.com/vxyzview/xyzvoid-kernel)
-        **Maintainer:** ${{ env.MAINTAINER }}
+        **Built by:** $MAINTAINER  
+        **Build Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')  
+        **Architecture:** $TARGET_ARCH  
+        **Configuration:** $KERNEL_CONFIG  
+        **Kernel Version:** $KERNEL_VERSION-xyzvoid  
         
-        ## 🚀 XYZVoid Features
+        ## 🚀 What's New
         
-        XYZVoid is a custom Linux kernel built for enhanced performance and stability, featuring:
-        - Custom optimizations for better performance
-        - Enhanced hardware compatibility
-        - Stability improvements and bug fixes
-        - Regular updates from upstream stable kernel
+        This release of XYZVoid kernel is based on the latest linux-$KERNEL_VERSION.y stable branch with custom patches and optimizations for enhanced performance and compatibility.
         
-        ## 📦 Distribution Packages
+        ### ✨ Features
+        - Custom kernel branding and version string
+        - Optimized build configuration for $TARGET_ARCH
+        - Enhanced compatibility patches
+        - Performance optimizations
+        - Security hardening improvements
         
-        This release includes native packages for multiple Linux distributions:
+        ### 📦 Available Packages
+        - **Debian/Ubuntu**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb\`
+        - **Fedora/RHEL/CentOS**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm\`
+        - **Arch Linux**: \`$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz\`
+        - **Void Linux**: \`$KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps\`
+        - **Generic**: \`$KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz\`
         
-        ### Debian/Ubuntu (.deb)
-        - **Installation:** \`sudo dpkg -i xyzvoid-linux-*.deb\`
-        - **Dependencies:** kmod, initramfs-tools
-        - **Bootloader:** Automatically updates GRUB
+        ### 🔧 Installation Instructions
         
-        ### Fedora/RHEL/CentOS (.rpm)
-        - **Installation:** \`sudo rpm -ivh xyzvoid-linux-*.rpm\`
-        - **Dependencies:** kmod, dracut
-        - **Bootloader:** Automatically updates GRUB2
+        #### Debian/Ubuntu
+        \`\`\`bash
+        sudo dpkg -i $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
+        sudo update-grub
+        \`\`\`
         
-        ### Arch Linux (.pkg.tar.zst)
-        - **Installation:** \`sudo pacman -U xyzvoid-linux-*.pkg.tar.zst\`
-        - **Dependencies:** kmod, mkinitcpio
-        - **Bootloader:** Automatically updates GRUB
+        #### Fedora/RHEL/CentOS
+        \`\`\`bash
+        sudo rpm -ivh $KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm
+        sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+        \`\`\`
         
-        ### Void Linux (.xbps)
-        - **Installation:** \`sudo xbps-install --repository=. xyzvoid-linux-*.xbps\`
-        - **Dependencies:** kmod, dracut
-        - **Bootloader:** Automatically updates GRUB
+        #### Arch Linux
+        \`\`\`bash
+        sudo pacman -U $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz
+        sudo mkinitcpio -p $KERNEL_NAME
+        sudo grub-mkconfig -o /boot/grub/grub.cfg
+        \`\`\`
         
-        ### Gentoo (.tbz2 + portage tree)
-        - **Installation:** Extract portage tree and emerge
-        - **Dependencies:** kmod, dracut
-        - **USE flags:** Custom XYZVoid optimizations
+        #### Void Linux
+        \`\`\`bash
+        sudo xbps-install --force $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps
+        sudo update-grub
+        \`\`\`
         
-        ## 📋 Available Configurations
-        
-        ### xyzvoid-defconfig
-        - Optimized default configuration for XYZVoid
-        - Balanced performance and compatibility
-        - Recommended for most users
-        
-        ### allmodconfig
-        - All modules enabled (where possible)
-        - Maximum hardware compatibility
-        - Larger package size
-        - Useful for testing and development
-        
-        ## 🔧 Recent Changes
+        ### 📋 Recent Changes
         
         EOF
         
-        # Add commit history
-        git log --oneline --no-merges ${LAST_TAG}..HEAD | head -20 | while read commit; do
-          echo "- ${commit}" >> CHANGELOG.md
-        done
-        
-        if [ $(git log --oneline --no-merges ${LAST_TAG}..HEAD | wc -l) -gt 20 ]; then
-          echo "- ... and $(( $(git log --oneline --no-merges ${LAST_TAG}..HEAD | wc -l) - 20 )) more commits" >> CHANGELOG.md
+        if [ -n "$COMMITS" ]; then
+          echo "Recent commits included in this build:" >> CHANGELOG.md
+          echo '```' >> CHANGELOG.md
+          echo "$COMMITS" >> CHANGELOG.md
+          echo '```' >> CHANGELOG.md
+        else
+          echo "Initial release build from linux-$KERNEL_VERSION.y branch" >> CHANGELOG.md
         fi
         
         cat >> CHANGELOG.md << EOF
         
-        ## 🛠️ Build Information
+        ### ⚠️ Important Notes
         
-        - **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-        - **Commit SHA:** $(git rev-parse HEAD)
-        - **Build Environment:** GitHub Actions Ubuntu Latest
-        - **Compiler:** GCC with ccache optimization
-        - **Architecture:** x86_64
+        - Always backup your current kernel before installing
+        - This is a custom kernel build and may not be suitable for all systems
+        - Test in a virtual machine or non-production environment first
+        - Report issues at: https://github.com/$MAINTAINER/$KERNEL_NAME/issues
         
-        ## 📥 Installation Instructions
+        ### 🛠️ Build Information
         
-        ### Quick Install (Debian/Ubuntu)
-        \`\`\`bash
-        wget https://github.com/vxyzview/xyzvoid-kernel/releases/download/${{ steps.version.outputs.version }}/xyzvoid-linux-xyzvoid-defconfig-*.deb
-        sudo dpkg -i xyzvoid-linux-xyzvoid-defconfig-*.deb
-        sudo reboot
-        \`\`\`
-        
-        ### Quick Install (Fedora/RHEL/CentOS)
-        \`\`\`bash
-        wget https://github.com/vxyzview/xyzvoid-kernel/releases/download/${{ steps.version.outputs.version }}/xyzvoid-linux-xyzvoid-defconfig-*.rpm
-        sudo rpm -ivh xyzvoid-linux-xyzvoid-defconfig-*.rpm
-        sudo reboot
-        \`\`\`
-        
-        ### Quick Install (Arch Linux)
-        \`\`\`bash
-        wget https://github.com/vxyzview/xyzvoid-kernel/releases/download/${{ steps.version.outputs.version }}/xyzvoid-linux-xyzvoid-defconfig-*.pkg.tar.zst
-        sudo pacman -U xyzvoid-linux-xyzvoid-defconfig-*.pkg.tar.zst
-        sudo reboot
-        \`\`\`
-        
-        ## ⚠️ Important Notes
-        
-        - **Backup:** Always backup your current kernel before installation
-        - **Testing:** Test the kernel in a virtual machine first
-        - **Rollback:** Keep your old kernel available for rollback
-        - **Hardware:** Verify hardware compatibility before installation
-        - **Modules:** Some proprietary drivers may need recompilation
-        
-        ## 🐛 Known Issues
-        
-        - Report issues at: https://github.com/vxyzview/xyzvoid-kernel/issues
-        - Include dmesg output and system information
-        - Check existing issues before reporting new ones
-        
-        ## 🤝 Contributing
-        
-        - Source code: https://github.com/vxyzview/xyzvoid-kernel
-        - Contributions welcome via pull requests
-        - Follow kernel coding standards
-        - Test thoroughly before submitting
-        
-        ## 📄 License
-        
-        XYZVoid kernel is licensed under GPL v2.0, same as the Linux kernel.
+        - **Source Branch**: linux-$KERNEL_VERSION.y
+        - **Commit SHA**: ${{ github.sha }}
+        - **Build Environment**: Ubuntu Latest (GitHub Actions)
+        - **Compiler**: GCC $(gcc --version | head -n1 | cut -d' ' -f4)
+        - **Build Jobs**: $JOBS parallel
         
         ---
         
-        **Full Changelog:** https://github.com/vxyzview/xyzvoid-kernel/compare/${LAST_TAG}...HEAD
-        **Download:** https://github.com/vxyzview/xyzvoid-kernel/releases/tag/${{ steps.version.outputs.version }}
+        **Full Changelog**: https://github.com/${{ github.repository }}/compare/\${LAST_TAG:-$(git rev-list --max-parents=0 HEAD)}...${{ github.sha }}
         EOF
-        
-        # Output for GitHub
-        CHANGELOG_CONTENT=$(cat CHANGELOG.md)
-        echo "changelog<<EOF" >> $GITHUB_OUTPUT
-        echo "$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Upload changelog
+    - name: Create TAR.XZ archive
+      run: |
+        tar -cJf $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz -C package-base .
+
+    - name: Generate build information
+      run: |
+        cat > build-info.txt << EOF
+        XYZVoid Kernel Build Information
+        ================================
+        
+        Kernel Name: $KERNEL_NAME
+        Kernel Version: $KERNEL_VERSION-xyzvoid
+        Architecture: $TARGET_ARCH
+        Configuration: $KERNEL_CONFIG
+        Build Date: $(date)
+        Maintainer: $MAINTAINER
+        
+        Build Details:
+        - Commit SHA: ${{ github.sha }}
+        - Branch: ${{ github.ref_name }}
+        - Build Environment: ${{ runner.os }}
+        - GCC Version: $(gcc --version | head -n1)
+        - Make Version: $(make --version | head -n1)
+        
+        Package Files Generated:
+        - Debian: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.deb
+        - Fedora: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid.$BUILD_DATE.*.rpm
+        - Arch: $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE-1-$TARGET_ARCH.pkg.tar.gz
+        - Void: $KERNEL_NAME-$KERNEL_VERSION.xyzvoid.$BUILD_DATE_1.$TARGET_ARCH.xbps
+        - Generic: $KERNEL_NAME-$KERNEL_VERSION-xyzvoid-$TARGET_ARCH.tar.xz
+        
+        Installation Notes:
+        - Contains kernel image: /boot/vmlinuz-$KERNEL_RELEASE
+        - Contains system map: /boot/System.map-$KERNEL_RELEASE
+        - Contains kernel config: /boot/config-$KERNEL_RELEASE
+        - Contains kernel modules: /lib/modules/$KERNEL_RELEASE/
+        - Contains kernel headers: /usr/include/
+        EOF
+
+    - name: Upload Debian package
       uses: actions/upload-artifact@v4
       with:
-        name: changelog
-        path: CHANGELOG.md
+        name: ${{ env.KERNEL_NAME }}-debian-${{ env.TARGET_ARCH }}
+        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.deb
+        retention-days: 30
 
-  create-release:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-    needs: [build-kernel, package-debian, package-fedora, package-archlinux, package-voidlinux, package-gentoo, generate-changelog]
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Download all packages
-      uses: actions/download-artifact@v4
+    - name: Upload RPM package
+      uses: actions/upload-artifact@v4
       with:
-        merge-multiple: true
+        name: ${{ env.KERNEL_NAME }}-fedora-${{ env.TARGET_ARCH }}
+        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid.${{ env.BUILD_DATE }}*.rpm
+        retention-days: 30
 
-    - name: Organize release assets
-      run: |
-        mkdir -p release-assets
-        
-        # Organize packages by distribution
-        find . -name "*.deb" -exec mv {} release-assets/ \;
-        find . -name "*.rpm" -exec mv {} release-assets/ \;
-        find . -name "*.pkg.tar.zst" -exec mv {} release-assets/ \;
-        find . -name "*.xbps" -exec mv {} release-assets/ \;
-        find . -name "*.tbz2" -exec mv {} release-assets/ \;
-        find . -name "*portage*.tar.bz2" -exec mv {} release-assets/ \;
-        
-        # Copy changelog
-        cp CHANGELOG.md release-assets/
-        
-        # Create checksums
-        cd release-assets
-        sha256sum * > SHA256SUMS
-        sha512sum * > SHA512SUMS
-        cd ..
-        
-        # List all files
-        echo "Release assets:"
-        ls -la release-assets/
+    - name: Upload Arch package
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.KERNEL_NAME }}-arch-${{ env.TARGET_ARCH }}
+        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}-1-${{ env.TARGET_ARCH }}.pkg.tar.gz
+        retention-days: 30
 
-    - name: Create GitHub Release
+    - name: Upload Void package
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.KERNEL_NAME }}-void-${{ env.TARGET_ARCH }}
+        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}_1.${{ env.TARGET_ARCH }}.xbps
+        retention-days: 30
+
+    - name: Upload TAR.XZ archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.KERNEL_NAME }}-generic-${{ env.TARGET_ARCH }}
+        path: ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.tar.xz
+        retention-days: 30
+
+    - name: Upload build information
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info-${{ env.TARGET_ARCH }}
+        path: |
+          build-info.txt
+          CHANGELOG.md
+        retention-days: 30
+
+    - name: Create release on tag
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ needs.generate-changelog.outputs.version }}
-        name: "XYZVoid Kernel ${{ needs.generate-changelog.outputs.version }}"
-        body: ${{ needs.generate-changelog.outputs.changelog }}
-        prerelease: ${{ github.event.inputs.prerelease == 'true' }}
         files: |
-          release-assets/*
+          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.deb
+          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid.${{ env.BUILD_DATE }}*.rpm
+          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}-1-${{ env.TARGET_ARCH }}.pkg.tar.gz
+          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}.xyzvoid.${{ env.BUILD_DATE }}_1.${{ env.TARGET_ARCH }}.xbps
+          ${{ env.KERNEL_NAME }}-${{ env.KERNEL_VERSION }}-xyzvoid-${{ env.TARGET_ARCH }}.tar.xz
+          build-info.txt
+        body_path: CHANGELOG.md
+        name: "XYZVoid Kernel ${{ env.KERNEL_VERSION }}-xyzvoid (${{ env.TARGET_ARCH }})"
+        tag_name: ${{ github.ref_name }}
         draft: false
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-  notify-completion:
-    needs: [build-kernel, package-debian, package-fedora, package-archlinux, package-voidlinux, package-gentoo]
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Notify build completion
-      run: |
-        echo "🎉 XYZVoid Kernel Build Pipeline Completed!"
-        echo ""
-        echo "📊 Build Summary:"
-        echo "- Kernel Version: ${{ needs.build-kernel.outputs.full_version }}"
-        echo "- Commit SHA: ${{ needs.build-kernel.outputs.commit_sha }}"
-        echo "- Build Date: ${{ needs.build-kernel.outputs.build_date }}"
-        echo ""
-        echo "📦 Distribution Packages:"
-        echo "- ✅ Debian/Ubuntu (.deb)"
-        echo "- ✅ Fedora/RHEL/CentOS (.rpm)"
-        echo "- ✅ Arch Linux (.pkg.tar.zst)"
-        echo "- ✅ Void Linux (.xbps)"
-        echo "- ✅ Gentoo (.tbz2 + portage)"
-        echo ""
-        echo "🚀 All packages are ready for distribution!"
-        
-        if [[ "${{ needs.build-kernel.result }}" != "success" ]]; then
-          echo "❌ Kernel build failed"
-          exit 1
-        fi
-        
-        if [[ "${{ needs.package-debian.result }}" != "success" ]]; then
-          echo "⚠️ Debian packaging had issues"
-        fi
-        
-        if [[ "${{ needs.package-fedora.result }}" != "success" ]]; then
-          echo "⚠️ Fedora packaging had issues"
-        fi
-        
-        if [[ "${{ needs.package-archlinux.result }}" != "success" ]]; then
-          echo "⚠️ Arch Linux packaging had issues"
-        fi
-        
-        if [[ "${{ needs.package-voidlinux.result }}" != "success" ]]; then
-          echo "⚠️ Void Linux packaging had issues"
-        fi
-        
-        if [[ "${{ needs.package-gentoo.result }}" != "success" ]]; then
-          echo "⚠️ Gentoo packaging had issues"
-        fi
-
-  cleanup:
-    needs: [create-release, notify-completion]
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Cleanup old artifacts
-      run: |
-        echo "🧹 Cleaning up build artifacts..."
-        echo "Build artifacts will be automatically cleaned by GitHub Actions retention policy."
-        echo "Release assets are preserved in the GitHub Release."
-        
-        # Note: Actual cleanup would require GitHub API calls with proper authentication
-        # This is mainly for documentation purposes
-        echo "✅ Cleanup completed"
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
