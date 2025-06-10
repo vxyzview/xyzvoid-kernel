@@ -38,8 +38,35 @@ jobs:
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
+
+    - name: Free additional disk space
+      run: |
+        # Remove additional packages to free up space
+        sudo apt-get remove -y --purge \
+          azure-cli \
+          google-chrome-stable \
+          firefox \
+          powershell \
+          mono-devel \
+          dotnet-* \
+          mysql-* \
+          postgresql-* \
+          snapd \
+          || true
+        
+        # Clean up Docker
+        sudo systemctl stop docker || true
+        sudo rm -rf /var/lib/docker /etc/docker
+        
+        # Clean up CodeQL
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        
+        # Clean package cache
+        sudo apt-get autoremove -y
+        sudo apt-get autoclean
+        
+        # Show available space
+        df -h
 
     - name: Checkout repository
       uses: actions/checkout@v4
